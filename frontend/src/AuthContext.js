@@ -30,6 +30,7 @@ export const AuthProvider = ({ children }) => {
     } else {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Verify token validity
@@ -108,7 +109,7 @@ export const AuthProvider = ({ children }) => {
         throw new Error(error.detail || 'Registration failed');
       }
 
-      const userData = await response.json();
+      await response.json();
 
       // Auto-login after registration
       return await login(username, password);

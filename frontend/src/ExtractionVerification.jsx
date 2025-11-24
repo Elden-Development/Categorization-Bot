@@ -8,15 +8,14 @@ const ExtractionVerification = ({ verificationData, documentType }) => {
   }
 
   const { extractionVerified, discrepancies = [], summary } = verificationData;
-  
+
   // Group discrepancies by confidence
   const highConfidence = discrepancies.filter(d => d.confidence === "High");
   const mediumConfidence = discrepancies.filter(d => d.confidence === "Medium");
-  const lowConfidence = discrepancies.filter(d => d.confidence === "Low" || !d.confidence);
-  
+
   // Determine which discrepancies to show based on the toggle state
-  const visibleDiscrepancies = showAllDiscrepancies 
-    ? discrepancies 
+  const visibleDiscrepancies = showAllDiscrepancies
+    ? discrepancies
     : [...highConfidence, ...mediumConfidence.slice(0, 3)];
 
   // Calculate if we're hiding any discrepancies

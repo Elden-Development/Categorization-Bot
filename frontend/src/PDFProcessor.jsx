@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import "./App.css";
 import VendorResearch from "./VendorResearch";
-import ExtractionVerification from "./ExtractionVerification";
 import SchemaSelector from "./SchemaSelector";
 import BankReconciliation from "./BankReconciliation";
 import DocumentList from "./DocumentList";
@@ -15,7 +14,6 @@ const PDFProcessor = () => {
 
   // Bank reconciliation state
   const [bankFile, setBankFile] = useState(null);
-  const [bankTransactions, setBankTransactions] = useState(null);
   const [reconciliationResults, setReconciliationResults] = useState(null);
   const [reconciliationLoading, setReconciliationLoading] = useState(false);
 
@@ -98,6 +96,7 @@ const PDFProcessor = () => {
       const nextDocId = processingQueue[0];
       processDocument(nextDocId);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [processingQueue, isProcessingBatch]);
 
   // Process a single document
@@ -311,6 +310,7 @@ const PDFProcessor = () => {
       document.removeEventListener("dragleave", handleDragLeave);
       document.removeEventListener("drop", handleDrop);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Handle drag events specifically for the first drop zone
@@ -465,8 +465,6 @@ const PDFProcessor = () => {
       if (!parseData.success || !parseData.transactions) {
         throw new Error("Failed to extract transactions from bank statement");
       }
-
-      setBankTransactions(parseData.transactions);
 
       // Step 2: Reconcile ALL completed documents with bank transactions
       const allParsedData = completedDocs.map(d => d.parsedData);

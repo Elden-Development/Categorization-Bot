@@ -53,6 +53,7 @@ const ReviewQueue = () => {
   useEffect(() => {
     fetchQueueItems();
     fetchStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterConfidence]);
 
   // Handle approval

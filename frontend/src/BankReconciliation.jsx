@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import "./App.css";
 
 const BankReconciliation = ({
@@ -6,18 +6,11 @@ const BankReconciliation = ({
   onManualMatch,
   onAcceptSuggestion
 }) => {
-  const [expandedTransaction, setExpandedTransaction] = useState(null);
-  const [selectedDocument, setSelectedDocument] = useState(null);
-
   if (!reconciliationResults) {
     return null;
   }
 
   const { matched, unmatched_documents, unmatched_transactions, suggested_matches, summary } = reconciliationResults;
-
-  const toggleExpand = (txId) => {
-    setExpandedTransaction(expandedTransaction === txId ? null : txId);
-  };
 
   const getConfidenceBadgeClass = (confidence) => {
     switch (confidence) {
