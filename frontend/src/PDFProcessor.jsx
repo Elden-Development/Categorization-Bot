@@ -3,24 +3,252 @@ import "./App.css";
 import VendorResearch from "./VendorResearch";
 import ExtractionVerification from "./ExtractionVerification";
 import SchemaSelector from "./SchemaSelector";
+import BankReconciliation from "./BankReconciliation";
+import DocumentList from "./DocumentList";
 
 const PDFProcessor = () => {
-  const [file, setFile] = useState(null);
+  // Batch processing state
+  const [documents, setDocuments] = useState([]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState(null);
+  const [processingQueue, setProcessingQueue] = useState([]);
+  const [isProcessingBatch, setIsProcessingBatch] = useState(false);
+
+  // Bank reconciliation state
   const [bankFile, setBankFile] = useState(null);
-  const [message, setMessage] = useState("");
-  const [downloadUrl, setDownloadUrl] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [bankTransactions, setBankTransactions] = useState(null);
+  const [reconciliationResults, setReconciliationResults] = useState(null);
+  const [reconciliationLoading, setReconciliationLoading] = useState(false);
+
+  // UI state
   const [dragActive, setDragActive] = useState(false);
   const [bankDragActive, setBankDragActive] = useState(false);
   const [overlayActive, setOverlayActive] = useState(false);
-  const [parsedData, setParsedData] = useState(null);
-  const [vendorName, setVendorName] = useState("");
-  const [documentType, setDocumentType] = useState("Unknown");
   const [selectedSchema, setSelectedSchema] = useState("generic");
+  const [message, setMessage] = useState("");
+
+  // Refs
   const fileInputRef = useRef(null);
   const bankFileInputRef = useRef(null);
   const dropContainerRef = useRef(null);
   const bankDropContainerRef = useRef(null);
+
+  // Load documents from localStorage on mount
+  useEffect(() => {
+    const savedDocuments = localStorage.getItem('processedDocuments');
+    if (savedDocuments) {
+      try {
+        const parsed = JSON.parse(savedDocuments);
+        // Filter out file objects (can't be serialized)
+        const documentsWithoutFiles = parsed.map(doc => ({
+          ...doc,
+          file: null
+        }));
+        setDocuments(documentsWithoutFiles);
+      } catch (error) {
+        console.error('Error loading saved documents:', error);
+      }
+    }
+  }, []);
+
+  // Save documents to localStorage whenever they change
+  useEffect(() => {
+    if (documents.length > 0) {
+      // Remove file objects before saving (they can't be serialized)
+      const documentsToSave = documents.map(doc => ({
+        ...doc,
+        file: null // Remove File object
+      }));
+      localStorage.setItem('processedDocuments', JSON.stringify(documentsToSave));
+    } else {
+      localStorage.removeItem('processedDocuments');
+    }
+  }, [documents]);
+
+  // Get selected document
+  const selectedDocument = documents.find(doc => doc.id === selectedDocumentId);
+
+  // Add files to document queue
+  const addFilesToQueue = (files) => {
+    const newDocuments = files.map(file => ({
+      id: `doc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      fileName: file.name,
+      file: file,
+      status: 'pending',
+      progress: 0,
+      parsedData: null,
+      categorization: null,
+      uploadedAt: new Date().toISOString(),
+      processedAt: null,
+      error: null
+    }));
+
+    setDocuments(prev => [...prev, ...newDocuments]);
+    setProcessingQueue(prev => [...prev, ...newDocuments.map(d => d.id)]);
+    setMessage(`${files.length} file(s) added to queue`);
+
+    // Auto-select first document if none selected
+    if (!selectedDocumentId && newDocuments.length > 0) {
+      setSelectedDocumentId(newDocuments[0].id);
+    }
+  };
+
+  // Process documents sequentially
+  useEffect(() => {
+    if (processingQueue.length > 0 && !isProcessingBatch) {
+      const nextDocId = processingQueue[0];
+      processDocument(nextDocId);
+    }
+  }, [processingQueue, isProcessingBatch]);
+
+  // Process a single document
+  const processDocument = async (docId) => {
+    setIsProcessingBatch(true);
+
+    const doc = documents.find(d => d.id === docId);
+    if (!doc || !doc.file) {
+      // Remove from queue and continue
+      setProcessingQueue(prev => prev.filter(id => id !== docId));
+      setIsProcessingBatch(false);
+      return;
+    }
+
+    // Update status to processing
+    updateDocumentStatus(docId, 'processing', 0);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", doc.file);
+      formData.append("schema", selectedSchema);
+
+      // Simulate progress
+      updateDocumentStatus(docId, 'processing', 25);
+
+      const res = await fetch("http://localhost:8000/process-pdf", {
+        method: "POST",
+        body: formData,
+      });
+
+      updateDocumentStatus(docId, 'processing', 75);
+
+      if (!res.ok) {
+        throw new Error(`Server responded with status: ${res.status}`);
+      }
+
+      const data = await res.json();
+      const jsonData = JSON.parse(data.response);
+
+      updateDocumentStatus(docId, 'processing', 85);
+
+      // Auto-categorize with smart categorization (confidence-aware)
+      let categorization = null;
+      try {
+        const vendorName = jsonData.documentMetadata?.source?.name ||
+                          jsonData.partyInformation?.vendor?.name ||
+                          'Unknown Vendor';
+
+        const catResponse = await fetch("http://localhost:8000/categorize-transaction-smart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vendor_name: vendorName,
+            document_data: jsonData,
+            transaction_purpose: jsonData.documentMetadata?.documentType || '',
+            confidence_threshold: 70,
+            auto_research: true
+          })
+        });
+
+        if (catResponse.ok) {
+          const catData = await catResponse.json();
+          categorization = {
+            category: catData.final_categorization?.category || catData.initial_categorization?.category,
+            subcategory: catData.final_categorization?.subcategory || catData.initial_categorization?.subcategory,
+            ledgerType: catData.final_categorization?.ledgerType || catData.initial_categorization?.ledgerType,
+            confidence: catData.confidence_metrics?.final_confidence || catData.initial_categorization?.confidence || 0,
+            needsReview: catData.needs_manual_review || false,
+            researchPerformed: catData.research_performed || false
+          };
+        }
+      } catch (catError) {
+        console.error('Error during smart categorization:', catError);
+        // Continue without categorization if it fails
+      }
+
+      updateDocumentStatus(docId, 'processing', 100);
+
+      // Update document with parsed data and categorization
+      setDocuments(prev => prev.map(d =>
+        d.id === docId
+          ? {
+              ...d,
+              status: 'completed',
+              progress: 100,
+              parsedData: jsonData,
+              categorization: categorization,
+              processedAt: new Date().toISOString(),
+              error: null
+            }
+          : d
+      ));
+
+      const confidenceMsg = categorization?.confidence
+        ? ` (Confidence: ${categorization.confidence.toFixed(1)}%)`
+        : '';
+      setMessage(`Document "${doc.fileName}" processed successfully${confidenceMsg}`);
+
+    } catch (error) {
+      console.error(`Error processing document ${doc.fileName}:`, error);
+      setDocuments(prev => prev.map(d =>
+        d.id === docId
+          ? {
+              ...d,
+              status: 'error',
+              progress: 0,
+              error: error.message,
+              processedAt: new Date().toISOString()
+            }
+          : d
+      ));
+      setMessage(`Error processing "${doc.fileName}": ${error.message}`);
+    } finally {
+      // Remove from queue and continue to next
+      setProcessingQueue(prev => prev.filter(id => id !== docId));
+      setIsProcessingBatch(false);
+    }
+  };
+
+  // Update document status
+  const updateDocumentStatus = (docId, status, progress = 0) => {
+    setDocuments(prev => prev.map(d =>
+      d.id === docId ? { ...d, status, progress } : d
+    ));
+  };
+
+  // Select a document to view
+  const handleSelectDocument = (docId) => {
+    setSelectedDocumentId(docId);
+  };
+
+  // Remove a document
+  const handleRemoveDocument = (docId) => {
+    setDocuments(prev => prev.filter(d => d.id !== docId));
+
+    if (selectedDocumentId === docId) {
+      const remaining = documents.filter(d => d.id !== docId);
+      setSelectedDocumentId(remaining.length > 0 ? remaining[0].id : null);
+    }
+  };
+
+  // Clear all documents
+  const handleClearAll = () => {
+    if (window.confirm('Are you sure you want to clear all documents? This cannot be undone.')) {
+      setDocuments([]);
+      setSelectedDocumentId(null);
+      setProcessingQueue([]);
+      setReconciliationResults(null);
+      setMessage('All documents cleared');
+    }
+  };
 
   // Handle drag events for the entire page
   useEffect(() => {
@@ -46,27 +274,27 @@ const PDFProcessor = () => {
       e.preventDefault();
       e.stopPropagation();
       setOverlayActive(false);
-      
+
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        const droppedFile = e.dataTransfer.files[0];
-        // Check if file type is valid (PDF or image)
-        if (droppedFile.type.includes('pdf') || droppedFile.type.includes('image/')) {
-          setFile(droppedFile);
-          
-          // Make the file input element reference the dropped file
-          if (fileInputRef.current) {
-            // Create a new DataTransfer object
-            const dataTransfer = new DataTransfer();
-            dataTransfer.items.add(droppedFile);
-            
-            // Assign the DataTransfer files to the file input
-            fileInputRef.current.files = dataTransfer.files;
-          }
-          
-          e.dataTransfer.clearData();
-        } else {
-          alert("Please upload a PDF or image file.");
+        const droppedFiles = Array.from(e.dataTransfer.files);
+
+        // Filter valid files (PDF or image)
+        const validFiles = droppedFiles.filter(file =>
+          file.type.includes('pdf') || file.type.includes('image/')
+        );
+
+        if (validFiles.length === 0) {
+          alert("Please upload PDF or image files only.");
+          return;
         }
+
+        if (validFiles.length < droppedFiles.length) {
+          alert(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
+        }
+
+        // Add files to document queue
+        addFilesToQueue(validFiles);
+        e.dataTransfer.clearData();
       }
     };
 
@@ -104,27 +332,27 @@ const PDFProcessor = () => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const droppedFile = e.dataTransfer.files[0];
-      // Check if file type is valid (PDF or image)
-      if (droppedFile.type.includes('pdf') || droppedFile.type.includes('image/')) {
-        setFile(droppedFile);
-        
-        // Make the file input element reference the dropped file
-        if (fileInputRef.current) {
-          // Create a new DataTransfer object
-          const dataTransfer = new DataTransfer();
-          dataTransfer.items.add(droppedFile);
-          
-          // Assign the DataTransfer files to the file input
-          fileInputRef.current.files = dataTransfer.files;
-        }
-        
-        e.dataTransfer.clearData();
-      } else {
-        alert("Please upload a PDF or image file.");
+      const droppedFiles = Array.from(e.dataTransfer.files);
+
+      // Filter valid files (PDF or image)
+      const validFiles = droppedFiles.filter(file =>
+        file.type.includes('pdf') || file.type.includes('image/')
+      );
+
+      if (validFiles.length === 0) {
+        alert("Please upload PDF or image files only.");
+        return;
       }
+
+      if (validFiles.length < droppedFiles.length) {
+        alert(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
+      }
+
+      // Add files to document queue
+      addFilesToQueue(validFiles);
+      e.dataTransfer.clearData();
     }
   };
 
@@ -172,9 +400,19 @@ const PDFProcessor = () => {
   };
 
   const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
-    if (selectedFile) {
-      setFile(selectedFile);
+    const selectedFiles = Array.from(e.target.files || []);
+    if (selectedFiles.length > 0) {
+      // Filter valid files
+      const validFiles = selectedFiles.filter(file =>
+        file.type.includes('pdf') || file.type.includes('image/')
+      );
+
+      if (validFiles.length === 0) {
+        alert("Please select PDF or image files only.");
+        return;
+      }
+
+      addFilesToQueue(validFiles);
     }
   };
 
@@ -189,105 +427,163 @@ const PDFProcessor = () => {
     setSelectedSchema(schema);
   };
 
-  const handleSubmit = async (e) => {
+  // Documents are now auto-processed when added to queue via processDocument()
+
+  // Bank statement reconciliation function (works with ALL completed documents)
+  const handleReconcile = async (e) => {
     e.preventDefault();
-    if (!file) {
-      alert("Please select a file.");
+    if (!bankFile) {
+      alert("Please select a bank statement file.");
       return;
     }
-    
-    // Double check the file input's files property
-    if (fileInputRef.current && !fileInputRef.current.files.length && file) {
-      // If somehow the file input doesn't have files but we have a file state
-      // Create a new DataTransfer object
-      try {
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(file);
-        
-        // Assign the DataTransfer files to the file input
-        fileInputRef.current.files = dataTransfer.files;
-      } catch (error) {
-        console.error("Error setting file input files:", error);
-      }
-    }
-    setLoading(true);
-    setMessage("");
-    setDownloadUrl("");
-    setParsedData(null);
-    setVendorName("");
-    setDocumentType("Unknown");
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("schema", selectedSchema); // Add the schema to the form data
+    const completedDocs = documents.filter(d => d.status === 'completed' && d.parsedData);
+    if (completedDocs.length === 0) {
+      alert("Please process at least one document before reconciling.");
+      return;
+    }
+
+    setReconciliationLoading(true);
+    setReconciliationResults(null);
 
     try {
-      const res = await fetch("http://localhost:8000/process-pdf", {
+      // Step 1: Parse bank statement
+      const formData = new FormData();
+      formData.append("file", bankFile);
+
+      const parseRes = await fetch("http://localhost:8000/parse-bank-statement", {
         method: "POST",
         body: formData,
       });
-      
-      if (!res.ok) {
-        throw new Error(`Server responded with status: ${res.status}`);
+
+      if (!parseRes.ok) {
+        throw new Error(`Failed to parse bank statement: ${parseRes.status}`);
       }
-      
-      const data = await res.json();
-      console.log("Response:", data.response);
-      
-      // Parse the JSON response
-      try {
-        const jsonData = JSON.parse(data.response);
-        setParsedData(jsonData);
-        
-        // Extract vendor name if available
-        if (jsonData && jsonData.partyInformation && jsonData.partyInformation.vendor) {
-          setVendorName(jsonData.partyInformation.vendor.name || "");
-        } else if (jsonData && jsonData.documentMetadata && jsonData.documentMetadata.source) {
-          setVendorName(jsonData.documentMetadata.source.name || "");
-        }
-        
-        // Extract document type
-        const docType = jsonData.documentMetadata && jsonData.documentMetadata.documentType 
-          ? jsonData.documentMetadata.documentType 
-          : "Unknown";
-        setDocumentType(docType);
-        
-        // Set message based on verification results
-        let statusMessage = `Document processed (${docType})`;
-        
-        // Check extraction verification results
-        const extractionIssues = jsonData.extractionVerification && !jsonData.extractionVerification.extractionVerified;
-        
-        if (extractionIssues) {
-          statusMessage += ". Possible data extraction issues detected.";
-        } else {
-          statusMessage += ". Processing successful!";
-        }
-        
-        setMessage(statusMessage);
-        
-      } catch (parseError) {
-        console.error("Error parsing JSON:", parseError);
+
+      const parseData = await parseRes.json();
+
+      if (!parseData.success || !parseData.transactions) {
+        throw new Error("Failed to extract transactions from bank statement");
       }
-      
-      // Use the response as plain text
-      const text = data.response;
-      const blob = new Blob([text], { type: "application/json" });
-      const url = window.URL.createObjectURL(blob);
-      setDownloadUrl(url);
-      
+
+      setBankTransactions(parseData.transactions);
+
+      // Step 2: Reconcile ALL completed documents with bank transactions
+      const allParsedData = completedDocs.map(d => d.parsedData);
+
+      const reconcileRes = await fetch("http://localhost:8000/reconcile", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          documents: allParsedData, // Reconcile ALL completed documents
+          bank_transactions: parseData.transactions,
+          auto_match_threshold: 90 // Auto-match if score >= 90%
+        }),
+      });
+
+      if (!reconcileRes.ok) {
+        throw new Error(`Reconciliation failed: ${reconcileRes.status}`);
+      }
+
+      const reconcileData = await reconcileRes.json();
+
+      if (!reconcileData.success) {
+        throw new Error("Reconciliation returned unsuccessful status");
+      }
+
+      setReconciliationResults(reconcileData.results);
+      setMessage(`Reconciled ${completedDocs.length} document(s) against bank statement`);
+
     } catch (error) {
-      console.error("Processing error:", error);
-      setMessage("An error occurred: " + error.message);
+      console.error("Reconciliation error:", error);
+      alert("Reconciliation error: " + error.message);
     } finally {
-      setLoading(false);
+      setReconciliationLoading(false);
     }
   };
 
-  // Placeholder for bank statement reconcile function (not functional yet)
-  const handleReconcile = (e) => {
-    e.preventDefault();
-    alert("Bank statement reconciliation feature coming soon!");
+  // Handle accepting a suggested match
+  const handleAcceptSuggestion = async (suggestion) => {
+    try {
+      const res = await fetch("http://localhost:8000/manual-match", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          document: suggestion.document,
+          transaction: suggestion.transaction
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Manual match failed: ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (data.success) {
+        // Update reconciliation results by moving from suggested to matched
+        setReconciliationResults(prev => {
+          const newMatched = [...prev.matched, data.match];
+          const newSuggested = prev.suggested_matches.filter(s =>
+            s.transaction.transaction_id !== suggestion.transaction.transaction_id
+          );
+
+          return {
+            ...prev,
+            matched: newMatched,
+            suggested_matches: newSuggested,
+            summary: {
+              ...prev.summary,
+              matched_count: newMatched.length,
+              suggested_matches_count: newSuggested.length,
+              reconciliation_rate: Math.round(
+                (newMatched.length / prev.summary.total_documents) * 100 * 100
+              ) / 100
+            }
+          };
+        });
+
+        alert("Match accepted successfully!");
+      }
+    } catch (error) {
+      console.error("Error accepting match:", error);
+      alert("Failed to accept match: " + error.message);
+    }
+  };
+
+  // Handle manual matching
+  const handleManualMatch = async (document, transaction) => {
+    try {
+      const res = await fetch("http://localhost:8000/manual-match", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          document: document,
+          transaction: transaction
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Manual match failed: ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (data.success) {
+        // Refresh reconciliation - re-run the reconciliation
+        alert("Manual match created successfully! Refreshing reconciliation...");
+        // You might want to re-trigger reconciliation here
+      }
+    } catch (error) {
+      console.error("Error creating manual match:", error);
+      alert("Failed to create manual match: " + error.message);
+    }
   };
 
   return (
@@ -334,16 +630,16 @@ const PDFProcessor = () => {
               Upload an invoice, receipt, or financial document to extract structured data.
             </p>
 
-            <form onSubmit={handleSubmit}>
-              {/* Schema selector added here */}
+            <div>
+              {/* Schema selector */}
               <SchemaSelector
                 selectedSchema={selectedSchema}
                 onSchemaChange={handleSchemaChange}
               />
 
               <div className="form-group">
-                <label htmlFor="pdfFile" className="form-label">Upload Document</label>
-                <div 
+                <label htmlFor="pdfFile" className="form-label">Upload Documents (Multiple Supported)</label>
+                <div
                   ref={dropContainerRef}
                   className={`file-input-container ${dragActive ? 'drag-active' : ''}`}
                   onDragEnter={handleDragEnterForZone}
@@ -358,8 +654,8 @@ const PDFProcessor = () => {
                     <line x1="12" y1="3" x2="12" y2="15" />
                   </svg>
                   <div className="file-input-text">
-                    <div className="file-input-title">Choose a document or drag and drop</div>
-                    <div className="file-input-description">PDF, JPG, PNG (max. 10MB)</div>
+                    <div className="file-input-title">Choose documents or drag and drop</div>
+                    <div className="file-input-description">PDF, JPG, PNG (max. 10MB per file) - Auto-processes</div>
                   </div>
                   <input
                     ref={fileInputRef}
@@ -368,85 +664,29 @@ const PDFProcessor = () => {
                     accept="application/pdf, image/*"
                     className="file-input"
                     onChange={handleFileChange}
-                    required={!file} // Only required if no file is selected
+                    multiple
                   />
                 </div>
-                {file && (
-                  <div className="file-name">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                      <polyline points="22 4 12 14.01 9 11.01" />
+                {isProcessingBatch && (
+                  <div className="processing-status">
+                    <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="12" y1="2" x2="12" y2="6" />
+                      <line x1="12" y1="18" x2="12" y2="22" />
+                      <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+                      <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+                      <line x1="2" y1="12" x2="6" y2="12" />
+                      <line x1="18" y1="12" x2="22" y2="12" />
+                      <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
+                      <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
                     </svg>
-                    <span>{file.name}</span>
+                    <span>Processing documents...</span>
                   </div>
                 )}
-              </div>
-
-              <button 
-                type="submit" 
-                className="btn" 
-                disabled={loading || !file}>
-                {loading ? (
-                  <>
-                    <div className="spinner-button">
-                      <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="12" y1="2" x2="12" y2="6" />
-                        <line x1="12" y1="18" x2="12" y2="22" />
-                        <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
-                        <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-                        <line x1="2" y1="12" x2="6" y2="12" />
-                        <line x1="18" y1="12" x2="22" y2="12" />
-                        <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
-                        <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-                      </svg>
-                      Processing Document...
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                      <polyline points="23 3 12 14 9 11" />
-                    </svg>
-                    Extract Data
-                  </>
-                )}
-              </button>
-            </form>
-
-            {/* Result container section after successful processing */}
-            {(message || downloadUrl) && (
-              <div className="result-container">
                 {message && (
-                  <div className="result-message">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                      <polyline points="22 4 12 14.01 9 11.01" />
-                    </svg>
-                    {message}
-                  </div>
-                )}
-
-                {downloadUrl && (
-                  <a href={downloadUrl} download="document_data.json" className="download-btn">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    Download Structured Data
-                  </a>
-                )}
-                
-                {/* Add Extraction Verification component if we have parsed data */}
-                {parsedData && parsedData.extractionVerification && (
-                  <ExtractionVerification 
-                    verificationData={parsedData.extractionVerification}
-                    documentType={documentType}
-                  />
+                  <div className="status-message">{message}</div>
                 )}
               </div>
-            )}
+            </div>
           </div>
 
           {/* RIGHT COLUMN - BANK STATEMENT */}
@@ -454,7 +694,7 @@ const PDFProcessor = () => {
             <div className="section-title">2. Reconciliation</div>
             <h2>Bank Statement</h2>
             <p className="description">
-              Upload your bank statement to reconcile against the extracted financial data.
+              Upload your bank statement to reconcile against {documents.filter(d => d.status === 'completed').length || 'all'} processed document(s).
             </p>
 
             <form onSubmit={handleReconcile}>
@@ -498,27 +738,70 @@ const PDFProcessor = () => {
                 )}
               </div>
 
-              <button 
-                type="submit" 
-                className="btn bank-btn" 
-                disabled={!bankFile || !downloadUrl}>
-                <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-                  <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-                  <path d="M9 14l2 2 4-4"></path>
-                </svg>
-                Reconcile Transactions
+              <button
+                type="submit"
+                className="btn bank-btn"
+                disabled={!bankFile || documents.filter(d => d.status === 'completed').length === 0 || reconciliationLoading}>
+                {reconciliationLoading ? (
+                  <>
+                    <div className="spinner-button">
+                      <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="12" y1="2" x2="12" y2="6" />
+                        <line x1="12" y1="18" x2="12" y2="22" />
+                        <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+                        <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+                        <line x1="2" y1="12" x2="6" y2="12" />
+                        <line x1="18" y1="12" x2="22" y2="12" />
+                        <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
+                        <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
+                      </svg>
+                      Reconciling...
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                      <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                      <path d="M9 14l2 2 4-4"></path>
+                    </svg>
+                    Reconcile Transactions
+                  </>
+                )}
               </button>
-              <div className="coming-soon-badge">Coming Soon</div>
             </form>
           </div>
         </div>
-        
-        {/* Vendor Research section */}
-        {parsedData && vendorName && (
-          <VendorResearch 
-            vendorName={vendorName}
-            jsonData={parsedData}
+
+        {/* Document List - shows all processed documents */}
+        {documents.length > 0 && (
+          <DocumentList
+            documents={documents}
+            selectedDocumentId={selectedDocumentId}
+            onSelectDocument={handleSelectDocument}
+            onRemoveDocument={handleRemoveDocument}
+            onClearAll={handleClearAll}
+          />
+        )}
+
+        {/* Vendor Research section - for selected document */}
+        {selectedDocument && selectedDocument.parsedData && (
+          <VendorResearch
+            vendorName={
+              selectedDocument.parsedData.documentMetadata?.source?.name ||
+              selectedDocument.parsedData.partyInformation?.vendor?.name ||
+              'Unknown Vendor'
+            }
+            jsonData={selectedDocument.parsedData}
+          />
+        )}
+
+        {/* Bank Reconciliation Results section */}
+        {reconciliationResults && (
+          <BankReconciliation
+            reconciliationResults={reconciliationResults}
+            onManualMatch={handleManualMatch}
+            onAcceptSuggestion={handleAcceptSuggestion}
           />
         )}
       </div>

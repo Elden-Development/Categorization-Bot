@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import "./App.css";
+import CategoryEditor from "./CategoryEditor";
 
 const VendorResearch = ({ vendorName, jsonData }) => {
   const [vendorInfo, setVendorInfo] = useState("");
@@ -9,18 +10,39 @@ const VendorResearch = ({ vendorName, jsonData }) => {
   const [categorization, setCategorization] = useState(null);
   const [categorizationLoading, setCategorizationLoading] = useState(false);
   const [categorizationError, setCategorizationError] = useState("");
+  const [selectedMethod, setSelectedMethod] = useState(null); // "ml" or "gemini"
+  const [mlStats, setMlStats] = useState(null);
+  const [savedTransactionId, setSavedTransactionId] = useState(null);
+
+  // Load ML stats on component mount
+  useEffect(() => {
+    loadMLStats();
+  }, []);
+
+  const loadMLStats = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/ml-stats");
+      const data = await response.json();
+      if (data.success) {
+        setMlStats(data.stats);
+      }
+    } catch (err) {
+      console.error("Error loading ML stats:", err);
+    }
+  };
 
   const researchVendor = async () => {
     if (!vendorName) return;
-    
+
     setLoading(true);
     setError("");
     setVendorInfo("");
     setCategorization(null);
-    
+    setSelectedMethod(null);
+
     try {
       console.log("Sending request to research vendor:", vendorName);
-      
+
       const response = await fetch("http://localhost:8000/research-vendor", {
         method: "POST",
         headers: {
@@ -28,34 +50,34 @@ const VendorResearch = ({ vendorName, jsonData }) => {
         },
         body: JSON.stringify({ vendor_name: vendorName }),
       });
-      
+
       console.log("Received response:", response);
-      
+
       if (!response.ok) {
         throw new Error(`HTTP error ${response.status}`);
       }
-      
+
       const data = await response.json();
       console.log("Response data:", data);
-      
+
       if (data.error) {
         setError(data.error);
         return;
       }
-      
+
       if (!data.response) {
         setError("Invalid response from server");
         return;
       }
-      
+
       // Simply use the text response directly
       setVendorInfo(data.response);
-      
-      // After getting vendor info, categorize the transaction
+
+      // After getting vendor info, categorize the transaction using HYBRID approach
       if (jsonData) {
-        categorizeTransaction(data.response);
+        categorizeTransactionHybrid(data.response);
       }
-      
+
     } catch (err) {
       console.error("Error in vendor research:", err);
       setError(`Failed to research vendor: ${err.message}`);
@@ -64,17 +86,18 @@ const VendorResearch = ({ vendorName, jsonData }) => {
     }
   };
 
-  const categorizeTransaction = async (vendorDetails) => {
+  const categorizeTransactionHybrid = async (vendorDetails) => {
     if (!vendorDetails || !jsonData) return;
-    
+
     setCategorizationLoading(true);
     setCategorizationError("");
     setCategorization(null);
-    
+    setSelectedMethod(null);
+
     try {
-      console.log("Sending request to categorize transaction");
-      
-      const response = await fetch("http://localhost:8000/categorize-transaction", {
+      console.log("Sending request to categorize transaction (hybrid)");
+
+      const response = await fetch("http://localhost:8000/categorize-transaction-hybrid", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -85,20 +108,32 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           transaction_purpose: transactionPurpose
         }),
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP error ${response.status}`);
       }
-      
+
       const data = await response.json();
-      
+
       if (data.error) {
         setCategorizationError(data.error);
         return;
       }
-      
-      setCategorization(data.response);
-      
+
+      setCategorization(data);
+
+      // Auto-select based on ML confidence if available
+      if (data.mlPrediction && data.mlPrediction.hasPrediction) {
+        const confidence = data.mlPrediction.confidence;
+        if (confidence >= 0.7) {
+          setSelectedMethod("ml"); // High confidence ML
+        } else {
+          setSelectedMethod("gemini"); // Low confidence, prefer Gemini
+        }
+      } else {
+        setSelectedMethod("gemini"); // No ML prediction, use Gemini
+      }
+
     } catch (err) {
       console.error("Error in transaction categorization:", err);
       setCategorizationError(`Failed to categorize transaction: ${err.message}`);
@@ -107,29 +142,111 @@ const VendorResearch = ({ vendorName, jsonData }) => {
     }
   };
 
+  const saveCategorizationDecision = async () => {
+    if (!categorization || !selectedMethod) return;
+
+    try {
+      const selectedCategorization = selectedMethod === "ml"
+        ? categorization.mlPrediction
+        : categorization.geminiCategorization;
+
+      const response = await fetch("http://localhost:8000/store-categorization", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          transaction_data: jsonData,
+          categorization: selectedCategorization,
+          transaction_purpose: transactionPurpose,
+          selected_method: selectedMethod,
+          user_feedback: `User chose ${selectedMethod} prediction`
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        alert("✓ Categorization saved! The system will learn from this decision.");
+        // Store transaction ID for correction functionality
+        setSavedTransactionId(data.transactionId);
+        // Reload ML stats to show updated count
+        loadMLStats();
+      } else {
+        alert("⚠ Could not save categorization: " + (data.error || "Unknown error"));
+      }
+    } catch (err) {
+      console.error("Error saving categorization:", err);
+      alert("⚠ Error saving categorization: " + err.message);
+    }
+  };
+
+  const handleCorrectionSubmitted = (correctedCategorization, result) => {
+    // Reload ML stats after correction
+    loadMLStats();
+
+    // Update the UI to show the corrected categorization
+    alert(`✓ Correction submitted successfully!\n\nThe ML system has learned from your correction.`);
+  };
+
+  // Helper function to strip markdown formatting and clean up text
+  const stripMarkdown = (text) => {
+    if (!text) return '';
+
+    return text
+      // Remove bold markdown (**text** or __text__)
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/__(.+?)__/g, '$1')
+      // Remove italic markdown (*text* or _text_)
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/_(.+?)_/g, '$1')
+      // Remove strikethrough markdown (~~text~~)
+      .replace(/~~(.+?)~~/g, '$1')
+      // Remove inline code markdown (`text`)
+      .replace(/`(.+?)`/g, '$1')
+      // Remove headers (# text)
+      .replace(/^#+\s+/gm, '')
+      // Clean up excessive whitespace
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+  };
+
   // Helper function to convert plain text with line breaks to formatted HTML
   const formatTextWithBreaks = (text) => {
     // If the text is empty, return nothing
     if (!text) return null;
-    
+
+    // First, strip markdown formatting
+    const cleanText = stripMarkdown(text);
+
     // Split text by line breaks and create paragraphs
-    const paragraphs = text.split(/\n\n+/);
-    
+    const paragraphs = cleanText.split(/\n\n+/);
+
     return (
       <>
         {paragraphs.map((paragraph, index) => {
           // Check if this paragraph looks like a heading (short and ends with a colon)
           const isHeading = paragraph.length < 50 && paragraph.trim().endsWith(':');
-          
+
           if (isHeading) {
-            return <h4 key={index}>{paragraph}</h4>;
+            return <h4 key={index} style={{
+              marginTop: '1.5rem',
+              marginBottom: '0.75rem',
+              fontSize: '1.125rem',
+              fontWeight: '600',
+              color: '#1f2937'
+            }}>{paragraph}</h4>;
           }
-          
+
           // For regular paragraphs, handle internal line breaks
           const lines = paragraph.split(/\n/);
-          
+
           return (
-            <p key={index}>
+            <p key={index} style={{
+              marginBottom: '1rem',
+              lineHeight: '1.6',
+              color: '#374151'
+            }}>
               {lines.map((line, lineIndex) => (
                 <React.Fragment key={lineIndex}>
                   {line}
@@ -143,15 +260,209 @@ const VendorResearch = ({ vendorName, jsonData }) => {
     );
   };
 
+  const getConfidenceColor = (confidence) => {
+    if (confidence >= 0.85) return "#10b981"; // green
+    if (confidence >= 0.7) return "#3b82f6"; // blue
+    if (confidence >= 0.55) return "#f59e0b"; // yellow
+    return "#ef4444"; // red
+  };
+
+  const renderMLPrediction = (mlPrediction) => {
+    if (!mlPrediction || !mlPrediction.hasPrediction) {
+      return (
+        <div className="ml-not-available">
+          <p>{mlPrediction?.reason || "No ML prediction available"}</p>
+        </div>
+      );
+    }
+
+    const isSelected = selectedMethod === "ml";
+    const confidencePercent = (mlPrediction.confidence * 100).toFixed(1);
+
+    return (
+      <div
+        className={`categorization-option ${isSelected ? "selected" : ""}`}
+        onClick={() => setSelectedMethod("ml")}
+        style={{
+          cursor: "pointer",
+          border: isSelected ? "3px solid #4f46e5" : "2px solid #e5e7eb",
+          borderRadius: "0.5rem",
+          padding: "1.5rem",
+          backgroundColor: isSelected ? "#f0f9ff" : "white",
+          transition: "all 0.2s"
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h4 style={{ margin: 0, color: "#1f2937" }}>
+            {isSelected && "✓ "} ML Prediction
+          </h4>
+          <div style={{
+            padding: "0.25rem 0.75rem",
+            borderRadius: "9999px",
+            backgroundColor: getConfidenceColor(mlPrediction.confidence),
+            color: "white",
+            fontSize: "0.875rem",
+            fontWeight: "600"
+          }}>
+            {confidencePercent}% confident
+          </div>
+        </div>
+
+        <div className="categorization-header">
+          <span className="category-name">
+            {mlPrediction.category} - {mlPrediction.subcategory}
+          </span>
+          <span className="category-tag" data-type={mlPrediction.ledgerType}>
+            {mlPrediction.ledgerType}
+          </span>
+        </div>
+
+        <div style={{ marginTop: "1rem" }}>
+          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
+            <strong>Confidence Level:</strong> {mlPrediction.confidenceLevel}
+          </p>
+          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
+            {mlPrediction.recommendation}
+          </p>
+          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
+            <strong>Based on:</strong> {mlPrediction.supportingTransactions} similar transactions
+          </p>
+        </div>
+
+        {mlPrediction.examples && mlPrediction.examples.length > 0 && (
+          <details style={{ marginTop: "1rem" }}>
+            <summary style={{ cursor: "pointer", fontWeight: "600", color: "#4f46e5" }}>
+              View Similar Transactions
+            </summary>
+            <div style={{ marginTop: "0.5rem" }}>
+              {mlPrediction.examples.map((example, idx) => (
+                <div key={idx} style={{
+                  padding: "0.5rem",
+                  backgroundColor: "#f9fafb",
+                  borderRadius: "0.25rem",
+                  marginTop: "0.5rem",
+                  fontSize: "0.875rem"
+                }}>
+                  <p style={{ margin: "0.25rem 0" }}>
+                    <strong>Vendor:</strong> {example.vendor || "Unknown"}
+                  </p>
+                  <p style={{ margin: "0.25rem 0" }}>
+                    <strong>Amount:</strong> ${example.amount}
+                  </p>
+                  <p style={{ margin: "0.25rem 0" }}>
+                    <strong>Similarity:</strong> {(example.score * 100).toFixed(1)}%
+                  </p>
+                  {example.text && (
+                    <p style={{ margin: "0.25rem 0", color: "#6b7280" }}>
+                      {example.text}...
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    );
+  };
+
+  const renderGeminiPrediction = (geminiCategorization) => {
+    if (!geminiCategorization || geminiCategorization.error) {
+      return (
+        <div className="gemini-not-available">
+          <p>{geminiCategorization?.error || "No Gemini categorization available"}</p>
+        </div>
+      );
+    }
+
+    const isSelected = selectedMethod === "gemini";
+
+    return (
+      <div
+        className={`categorization-option ${isSelected ? "selected" : ""}`}
+        onClick={() => setSelectedMethod("gemini")}
+        style={{
+          cursor: "pointer",
+          border: isSelected ? "3px solid #4f46e5" : "2px solid #e5e7eb",
+          borderRadius: "0.5rem",
+          padding: "1.5rem",
+          backgroundColor: isSelected ? "#f0f9ff" : "white",
+          transition: "all 0.2s"
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h4 style={{ margin: 0, color: "#1f2937" }}>
+            {isSelected && "✓ "} Gemini AI Categorization
+          </h4>
+          <div style={{
+            padding: "0.25rem 0.75rem",
+            borderRadius: "9999px",
+            backgroundColor: "#8b5cf6",
+            color: "white",
+            fontSize: "0.875rem",
+            fontWeight: "600"
+          }}>
+            AI Powered
+          </div>
+        </div>
+
+        <div className="categorization-header">
+          <span className="category-name">
+            {geminiCategorization.category} - {geminiCategorization.subcategory}
+          </span>
+          <span className="category-tag" data-type={geminiCategorization.ledgerType}>
+            {geminiCategorization.ledgerType}
+          </span>
+        </div>
+
+        <div className="categorization-details" style={{ marginTop: "1rem" }}>
+          <p><strong>Company:</strong> {geminiCategorization.companyName}</p>
+          <p><strong>Description:</strong> {geminiCategorization.description}</p>
+
+          {geminiCategorization.explanation && (
+            <div className="explanation-section" style={{ marginTop: "1rem" }}>
+              <h4 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>Explanation</h4>
+              <div className="explanation-content" style={{ fontSize: "0.875rem", color: "#374151" }}>
+                {geminiCategorization.explanation.split('\n').map((paragraph, i) => (
+                  <p key={i}>{paragraph}</p>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="vendor-research">
-      <h3 className="section-title">Vendor Information</h3>
-      
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: "1rem"
+      }}>
+        <h3 className="section-title">Vendor Information</h3>
+        {mlStats && mlStats.totalTransactions > 0 && (
+          <div style={{
+            padding: "0.5rem 1rem",
+            backgroundColor: "#ecfdf5",
+            border: "1px solid #6ee7b7",
+            borderRadius: "0.375rem",
+            fontSize: "0.875rem",
+            color: "#047857",
+            fontWeight: "600"
+          }}>
+            📚 {mlStats.totalTransactions.toLocaleString()} transactions learned
+          </div>
+        )}
+      </div>
+
       <div className="vendor-details">
         <p>
           <strong>Vendor Name:</strong> {vendorName || "Not available"}
         </p>
-        
+
         {jsonData && jsonData.partyInformation && jsonData.partyInformation.vendor && (
           <>
             <p>
@@ -166,7 +477,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           </>
         )}
       </div>
-      
+
       {/* Transaction Purpose Input */}
       <div className="form-group">
         <label htmlFor="transactionPurpose" className="form-label">Transaction Purpose (Optional)</label>
@@ -189,7 +500,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           }}
         />
       </div>
-      
+
       <div className="info-message" style={{
         padding: '0.75rem',
         backgroundColor: '#f0f9ff',
@@ -199,12 +510,12 @@ const VendorResearch = ({ vendorName, jsonData }) => {
         fontSize: '0.875rem',
         color: '#0369a1'
       }}>
-        <strong>Note:</strong> The transaction will be categorized from your perspective as the invoice recipient, 
-        not from the vendor's perspective. For example, purchases from vendors are typically expenses for your business.
+        <strong>🤖 Hybrid AI + ML:</strong> This system uses both Machine Learning (patterns from historical data)
+        and Gemini AI (contextual understanding) to provide the best categorization.
       </div>
-      
-      <button 
-        onClick={researchVendor} 
+
+      <button
+        onClick={researchVendor}
         className="btn research-btn"
         disabled={loading || !vendorName}
       >
@@ -232,13 +543,13 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           </>
         )}
       </button>
-      
+
       {error && (
         <div className="error-message">
           {error}
         </div>
       )}
-      
+
       {vendorInfo && (
         <div className="vendor-info-wrapper">
           <div className="vendor-info">
@@ -246,7 +557,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           </div>
         </div>
       )}
-      
+
       {/* Financial Categorization Results */}
       {categorizationLoading && (
         <div className="financial-categorization">
@@ -262,11 +573,11 @@ const VendorResearch = ({ vendorName, jsonData }) => {
               <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
               <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
             </svg>
-            Categorizing transaction...
+            Analyzing with ML and AI...
           </div>
         </div>
       )}
-      
+
       {categorizationError && (
         <div className="financial-categorization">
           <h3 className="section-title">Financial Categorization</h3>
@@ -275,42 +586,78 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           </div>
         </div>
       )}
-      
+
       {categorization && (
         <div className="financial-categorization">
-          <h3 className="section-title">Financial Categorization (From Recipient's Perspective)</h3>
-          <div className="categorization-card">
-            <div className="categorization-header">
-              <span className="category-name">{categorization.category} - {categorization.subcategory}</span>
-              <span className="category-tag" data-type={categorization.ledgerType}>
-                {categorization.ledgerType}
-              </span>
+          <h3 className="section-title">
+            Financial Categorization - Choose Your Preferred Method
+          </h3>
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "1.5rem",
+            marginBottom: "1.5rem"
+          }}>
+            {renderMLPrediction(categorization.mlPrediction)}
+            {renderGeminiPrediction(categorization.geminiCategorization)}
+          </div>
+
+          {selectedMethod && (
+            <div style={{ textAlign: "center" }}>
+              <button
+                onClick={saveCategorizationDecision}
+                style={{
+                  padding: "0.75rem 2rem",
+                  backgroundColor: "#10b981",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "0.5rem",
+                  fontSize: "1rem",
+                  fontWeight: "600",
+                  cursor: "pointer",
+                  boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
+                  transition: "all 0.2s"
+                }}
+                onMouseOver={(e) => e.target.style.backgroundColor = "#059669"}
+                onMouseOut={(e) => e.target.style.backgroundColor = "#10b981"}
+              >
+                💾 Save & Learn from This Decision
+              </button>
+              <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#6b7280" }}>
+                Your choice will improve future predictions
+              </p>
             </div>
-            <div className="categorization-details">
-              <p><strong>Company:</strong> {categorization.companyName}</p>
-              <p><strong>Description:</strong> {categorization.description}</p>
-              
-              {/* Add the explanation section */}
-              {categorization.explanation && (
-                <div className="explanation-section">
-                  <h4>Explanation</h4>
-                  <div className="explanation-content">
-                    {categorization.explanation.split('\n').map((paragraph, i) => (
-                      <p key={i}>{paragraph}</p>
-                    ))}
-                  </div>
-                </div>
-              )}
-              
-              {/* Add debug info if needed */}
-              <div className="debug-info">
-                <details>
-                  <summary>Debug Info</summary>
-                  <pre>{JSON.stringify(categorization, null, 2)}</pre>
-                </details>
+          )}
+
+          {/* Category Editor for corrections - shown after saving */}
+          {savedTransactionId && selectedMethod && (
+            <div style={{ marginTop: "2rem" }}>
+              <CategoryEditor
+                currentCategorization={
+                  selectedMethod === "ml"
+                    ? categorization.mlPrediction
+                    : categorization.geminiCategorization
+                }
+                onSubmitCorrection={handleCorrectionSubmitted}
+                transactionData={jsonData}
+                transactionPurpose={transactionPurpose}
+                transactionId={savedTransactionId}
+              />
+              <div style={{
+                marginTop: "1rem",
+                padding: "0.75rem",
+                backgroundColor: "#dbeafe",
+                border: "1px solid #60a5fa",
+                borderRadius: "0.375rem",
+                fontSize: "0.875rem",
+                color: "#1e40af"
+              }}>
+                <strong>💡 Tip:</strong> Found a mistake? Use the editor above to correct the categorization.
+                Your corrections help the ML system learn and improve!
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

@@ -1,0 +1,36 @@
+# Core FastAPI dependencies (updated for Python 3.13)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+pydantic[email]>=2.10.0  # Include email validation support
+
+# Google Gemini AI
+google-genai>=0.2.0
+
+# PDF Processing
+PyPDF2>=3.0.1
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Vector Database - Pinecone
+pinecone>=5.0.0
+
+# Additional utilities
+httpx>=0.28.0
+
+# Reconciliation and Fuzzy Matching
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.25.0
+pandas>=2.2.0
+
+# Database - PostgreSQL with SQLAlchemy ORM
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9  # PostgreSQL adapter
+alembic>=1.13.0  # Database migrations
+
+# Authentication and Security
+passlib>=1.7.4  # Password hashing
+python-jose[cryptography]>=3.3.0  # JWT tokens
+bcrypt>=4.1.0  # Password encryption
+slowapi>=0.1.9  # API rate limiting
