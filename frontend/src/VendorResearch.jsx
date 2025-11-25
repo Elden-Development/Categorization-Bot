@@ -3,13 +3,13 @@ import "./App.css";
 import CategoryEditor from "./CategoryEditor";
 
 const VendorResearch = ({ vendorName, jsonData }) => {
-  const [vendorInfo, setVendorInfo] = useState("`)
+  const [vendorInfo, setVendorInfo] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("`)
-  const [transactionPurpose, setTransactionPurpose] = useState("`)
+  const [error, setError] = useState("");
+  const [transactionPurpose, setTransactionPurpose] = useState("");
   const [categorization, setCategorization] = useState(null);
   const [categorizationLoading, setCategorizationLoading] = useState(false);
-  const [categorizationError, setCategorizationError] = useState("`)
+  const [categorizationError, setCategorizationError] = useState("");
   const [selectedMethod, setSelectedMethod] = useState(null); // "ml" or "gemini"
   const [mlStats, setMlStats] = useState(null);
   const [savedTransactionId, setSavedTransactionId] = useState(null);
@@ -23,7 +23,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
 
   const loadMLStats = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/ml-stats`)
+      const response = await fetch(`${API_BASE_URL}/ml-stats`);
       const data = await response.json();
       if (data.success) {
         setMlStats(data.stats);
@@ -37,15 +37,15 @@ const VendorResearch = ({ vendorName, jsonData }) => {
     if (!vendorName) return;
 
     setLoading(true);
-    setError("`)
-    setVendorInfo("`)
+    setError("");
+    setVendorInfo("");
     setCategorization(null);
     setSelectedMethod(null);
 
     try {
       console.log("Sending request to research vendor:", vendorName);
 
-      const response = await fetch(`${API_BASE_URL}/research-vendor", {
+      const response = await fetch(`${API_BASE_URL}/research-vendor`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -68,7 +68,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
       }
 
       if (!data.response) {
-        setError("Invalid response from server`)
+        setError("Invalid response from server");
         return;
       }
 
@@ -92,14 +92,14 @@ const VendorResearch = ({ vendorName, jsonData }) => {
     if (!vendorDetails || !jsonData) return;
 
     setCategorizationLoading(true);
-    setCategorizationError("`)
+    setCategorizationError("");
     setCategorization(null);
     setSelectedMethod(null);
 
     try {
-      console.log("Sending request to categorize transaction (hybrid)`)
+      console.log("Sending request to categorize transaction (hybrid)");
 
-      const response = await fetch(`${API_BASE_URL}/categorize-transaction-hybrid", {
+      const response = await fetch(`${API_BASE_URL}/categorize-transaction-hybrid`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -128,12 +128,12 @@ const VendorResearch = ({ vendorName, jsonData }) => {
       if (data.mlPrediction && data.mlPrediction.hasPrediction) {
         const confidence = data.mlPrediction.confidence;
         if (confidence >= 0.7) {
-          setSelectedMethod("ml`) // High confidence ML
+          setSelectedMethod("ml"); // High confidence ML
         } else {
-          setSelectedMethod("gemini`) // Low confidence, prefer Gemini
+          setSelectedMethod("gemini"); // Low confidence, prefer Gemini
         }
       } else {
-        setSelectedMethod("gemini`) // No ML prediction, use Gemini
+        setSelectedMethod("gemini"); // No ML prediction, use Gemini
       }
 
     } catch (err) {
@@ -152,7 +152,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
         ? categorization.mlPrediction
         : categorization.geminiCategorization;
 
-      const response = await fetch(`${API_BASE_URL}/store-categorization", {
+      const response = await fetch(`${API_BASE_URL}/store-categorization`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -169,7 +169,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
       const data = await response.json();
 
       if (data.success) {
-        alert("✓ Categorization saved! The system will learn from this decision.`)
+        alert("✓ Categorization saved! The system will learn from this decision.");
         // Store transaction ID for correction functionality
         setSavedTransactionId(data.transactionId);
         // Reload ML stats to show updated count
