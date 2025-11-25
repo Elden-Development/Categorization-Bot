@@ -17,6 +17,8 @@ const CategoryEditor = ({
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
   // Load categories from backend
   useEffect(() => {
     loadCategories();
@@ -33,7 +35,7 @@ const CategoryEditor = ({
 
   const loadCategories = async () => {
     try {
-      const response = await fetch("http://localhost:8000/categories");
+      const response = await fetch(`${API_BASE_URL}/categories`);
       const data = await response.json();
 
       if (data.success) {
@@ -85,7 +87,7 @@ const CategoryEditor = ({
     };
 
     try {
-      const response = await fetch("http://localhost:8000/submit-correction", {
+      const response = await fetch(`${API_BASE_URL}/submit-correction`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

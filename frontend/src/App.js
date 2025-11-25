@@ -73,10 +73,12 @@ const MainApp = () => {
   const [activeTab, setActiveTab] = useState('processor');
   const [reviewQueueCount, setReviewQueueCount] = useState(0);
 
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
   // Fetch review queue count for badge
   const fetchReviewQueueCount = async () => {
     try {
-      const response = await fetch('http://localhost:8000/review-queue/stats');
+      const response = await fetch(`${API_BASE_URL}/review-queue/stats`);
       if (response.ok) {
         const data = await response.json();
         setReviewQueueCount(data.total_needs_review || 0);

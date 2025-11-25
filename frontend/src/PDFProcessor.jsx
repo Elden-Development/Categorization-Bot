@@ -24,6 +24,8 @@ const PDFProcessor = () => {
   const [selectedSchema, setSelectedSchema] = useState("generic");
   const [message, setMessage] = useState("");
 
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
   // Refs
   const fileInputRef = useRef(null);
   const bankFileInputRef = useRef(null);
@@ -122,7 +124,7 @@ const PDFProcessor = () => {
       // Simulate progress
       updateDocumentStatus(docId, 'processing', 25);
 
-      const res = await fetch("http://localhost:8000/process-pdf", {
+      const res = await fetch(`${API_BASE_URL}/process-pdf`, {
         method: "POST",
         body: formData,
       });
@@ -145,7 +147,7 @@ const PDFProcessor = () => {
                           jsonData.partyInformation?.vendor?.name ||
                           'Unknown Vendor';
 
-        const catResponse = await fetch("http://localhost:8000/categorize-transaction-smart", {
+        const catResponse = await fetch(`${API_BASE_URL}/categorize-transaction-smart`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -451,7 +453,7 @@ const PDFProcessor = () => {
       const formData = new FormData();
       formData.append("file", bankFile);
 
-      const parseRes = await fetch("http://localhost:8000/parse-bank-statement", {
+      const parseRes = await fetch(`${API_BASE_URL}/parse-bank-statement`, {
         method: "POST",
         body: formData,
       });
@@ -469,7 +471,7 @@ const PDFProcessor = () => {
       // Step 2: Reconcile ALL completed documents with bank transactions
       const allParsedData = completedDocs.map(d => d.parsedData);
 
-      const reconcileRes = await fetch("http://localhost:8000/reconcile", {
+      const reconcileRes = await fetch(`${API_BASE_URL}/reconcile`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -505,7 +507,7 @@ const PDFProcessor = () => {
   // Handle accepting a suggested match
   const handleAcceptSuggestion = async (suggestion) => {
     try {
-      const res = await fetch("http://localhost:8000/manual-match", {
+      const res = await fetch("`${API_BASE_URL}/manual-match`", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -556,7 +558,7 @@ const PDFProcessor = () => {
   // Handle manual matching
   const handleManualMatch = async (document, transaction) => {
     try {
-      const res = await fetch("http://localhost:8000/manual-match", {
+      const res = await fetch("`${API_BASE_URL}/manual-match`", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

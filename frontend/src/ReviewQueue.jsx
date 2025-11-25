@@ -15,7 +15,7 @@ const ReviewQueue = () => {
   });
   const [filterConfidence, setFilterConfidence] = useState({ min: 0, max: 70 });
 
-  const API_BASE_URL = 'http://localhost:8000';
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
   // Fetch review queue items
   const fetchQueueItems = async () => {
