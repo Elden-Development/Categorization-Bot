@@ -151,7 +151,7 @@ class MLCategorizationEngine:
             response = await asyncio.to_thread(
                 self.gemini_client.models.embed_content,
                 model=self.embedding_model,
-                content=text
+                contents=text
             )
 
             # Extract the embedding vector
