@@ -19,6 +19,7 @@ const VendorResearch = ({ vendorName, jsonData }) => {
   // Load ML stats on component mount
   useEffect(() => {
     loadMLStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadMLStats = async () => {

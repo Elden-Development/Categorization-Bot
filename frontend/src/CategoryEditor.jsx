@@ -22,6 +22,7 @@ const CategoryEditor = ({
   // Load categories from backend
   useEffect(() => {
     loadCategories();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Initialize with current categorization

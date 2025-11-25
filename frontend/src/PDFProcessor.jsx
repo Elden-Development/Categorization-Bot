@@ -507,7 +507,7 @@ const PDFProcessor = () => {
   // Handle accepting a suggested match
   const handleAcceptSuggestion = async (suggestion) => {
     try {
-      const res = await fetch("`${API_BASE_URL}/manual-match`", {
+      const res = await fetch(`${API_BASE_URL}/manual-match`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -558,7 +558,7 @@ const PDFProcessor = () => {
   // Handle manual matching
   const handleManualMatch = async (document, transaction) => {
     try {
-      const res = await fetch("`${API_BASE_URL}/manual-match`", {
+      const res = await fetch(`${API_BASE_URL}/manual-match`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

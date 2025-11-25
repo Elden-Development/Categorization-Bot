@@ -93,6 +93,7 @@ const MainApp = () => {
     fetchReviewQueueCount();
     const interval = setInterval(fetchReviewQueueCount, 30000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Refresh count when switching to processor tab
@@ -101,6 +102,7 @@ const MainApp = () => {
       const timeout = setTimeout(fetchReviewQueueCount, 2000);
       return () => clearTimeout(timeout);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   return (
