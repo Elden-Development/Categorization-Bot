@@ -499,7 +499,7 @@ async def verify_extraction(json_data):
         # Make the API call to Gemini
         verification_response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-1.5-pro",
+            model="gemini-1.5-flash-001",
             contents=[verification_prompt],
             config={
                 "max_output_tokens": 4000,
@@ -578,7 +578,7 @@ async def process_page(page, schema="generic"):
     # Step 1: Extract raw text from the page.
     raw_response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-1.5-pro",
+        model="gemini-1.5-flash-001",
         contents=[RAW_PROMPT, file_part],
         config={
             "max_output_tokens": 40000,
@@ -591,7 +591,7 @@ async def process_page(page, schema="generic"):
     json_prompt = generate_schema_prompt(schema, raw_text)
     json_response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-1.5-pro",
+        model="gemini-1.5-flash-001",
         contents=[json_prompt],
         config={
             "max_output_tokens": 40000,
@@ -757,7 +757,7 @@ async def process_file(
             )
             raw_response = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-1.5-pro",
+                model="gemini-1.5-flash-001",
                 contents=[RAW_PROMPT, file_part],
                 config={
                     "max_output_tokens": 40000,
@@ -771,7 +771,7 @@ async def process_file(
             
             json_response = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-1.5-pro",
+                model="gemini-1.5-flash-001",
                 contents=[json_prompt],
                 config={
                     "max_output_tokens": 40000,
@@ -952,7 +952,7 @@ async def research_vendor(
         # Send the request to Gemini API with search enabled
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-1.5-pro",
+            model="gemini-1.5-flash-001",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
@@ -1105,7 +1105,7 @@ async def research_vendor_enhanced(
         # Send the request to Gemini API with search enabled
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-1.5-pro",
+            model="gemini-1.5-flash-001",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
@@ -1301,7 +1301,7 @@ async def categorize_transaction(request: FinancialCategorizationRequest):
         # Send the request to Gemini API
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-1.5-pro",
+            model="gemini-1.5-flash-001",
             contents=prompt,
             config={
                 "max_output_tokens": 4000,
@@ -1758,7 +1758,7 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
     # Send the request to Gemini API
     response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-1.5-pro",
+        model="gemini-1.5-flash-001",
         contents=prompt,
         config={
             "max_output_tokens": 4000,
