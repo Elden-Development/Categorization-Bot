@@ -74,6 +74,20 @@ class MLCategorizationEngine:
         else:
             print(f"Index '{self.index_name}' already exists")
 
+    def _safe_get(self, data, *keys, default=None):
+        """Safely navigate nested dicts/lists, returning default if any key fails."""
+        result = data
+        for key in keys:
+            if result is None:
+                return default
+            if isinstance(result, dict):
+                result = result.get(key)
+            elif isinstance(result, list) and isinstance(key, int) and 0 <= key < len(result):
+                result = result[key]
+            else:
+                return default
+        return result if result is not None else default
+
     def _generate_transaction_text(self, transaction_data: Dict) -> str:
         """
         Convert transaction data into a comprehensive text representation for embedding.
@@ -89,50 +103,53 @@ class MLCategorizationEngine:
         """
         parts = []
 
-        # Extract vendor/source information
-        doc_metadata = transaction_data.get("documentMetadata", {})
-        source = doc_metadata.get("source", {})
+        # Ensure transaction_data is a dict
+        if not isinstance(transaction_data, dict):
+            return "Unknown transaction"
 
-        if source.get("name"):
-            parts.append(f"Vendor: {source['name']}")
+        # Extract vendor/source information (with safe access)
+        vendor_name = self._safe_get(transaction_data, "documentMetadata", "source", "name")
+        if vendor_name:
+            parts.append(f"Vendor: {vendor_name}")
 
-        if doc_metadata.get("documentType"):
-            parts.append(f"Document Type: {doc_metadata['documentType']}")
+        doc_type = self._safe_get(transaction_data, "documentMetadata", "documentType")
+        if doc_type:
+            parts.append(f"Document Type: {doc_type}")
 
         # Extract financial data
-        financial_data = transaction_data.get("financialData", {})
-        if financial_data.get("totalAmount"):
-            parts.append(f"Amount: ${financial_data['totalAmount']}")
+        total_amount = self._safe_get(transaction_data, "financialData", "totalAmount")
+        if total_amount:
+            parts.append(f"Amount: ${total_amount}")
 
-        if financial_data.get("currency"):
-            parts.append(f"Currency: {financial_data['currency']}")
+        currency = self._safe_get(transaction_data, "financialData", "currency")
+        if currency:
+            parts.append(f"Currency: {currency}")
 
         # Extract party information
-        party_info = transaction_data.get("partyInformation", {})
-        vendor_info = party_info.get("vendor", {})
-
-        if vendor_info.get("name"):
-            parts.append(f"Supplier: {vendor_info['name']}")
+        supplier_name = self._safe_get(transaction_data, "partyInformation", "vendor", "name")
+        if supplier_name:
+            parts.append(f"Supplier: {supplier_name}")
 
         # Extract line items and create description
-        line_items = transaction_data.get("lineItems", [])
-        if line_items:
+        line_items = self._safe_get(transaction_data, "lineItems", default=[])
+        if isinstance(line_items, list) and line_items:
             item_descriptions = []
-            for item in line_items[:5]:  # Limit to first 5 items to avoid too long text
-                desc = item.get("description", "")
-                if desc:
-                    item_descriptions.append(desc)
+            for item in line_items[:5]:  # Limit to first 5 items
+                if isinstance(item, dict):
+                    desc = item.get("description", "")
+                    if desc:
+                        item_descriptions.append(str(desc))
 
             if item_descriptions:
                 parts.append(f"Items: {', '.join(item_descriptions)}")
 
         # Additional notes
-        additional = transaction_data.get("additionalData", {})
-        if additional.get("notes"):
-            parts.append(f"Notes: {additional['notes']}")
+        notes = self._safe_get(transaction_data, "additionalData", "notes")
+        if notes:
+            parts.append(f"Notes: {notes}")
 
         # Combine all parts
-        transaction_text = " | ".join(parts)
+        transaction_text = " | ".join(parts) if parts else "Unknown transaction"
 
         return transaction_text
 

@@ -1392,8 +1392,15 @@ async def categorize_transaction_smart(
         result["initial_categorization"] = initial_categorization
         result["workflow"][-1]["status"] = "completed"
 
-        # Extract confidence score
-        confidence = initial_categorization.get("confidence", 0)
+        # Extract confidence score (ensure it's a number)
+        raw_confidence = initial_categorization.get("confidence", 0)
+        try:
+            if isinstance(raw_confidence, str):
+                confidence = float(''.join(c for c in raw_confidence if c.isdigit() or c == '.') or '0')
+            else:
+                confidence = float(raw_confidence) if raw_confidence else 0
+        except (ValueError, TypeError):
+            confidence = 0
         result["confidence_metrics"]["initial_confidence"] = confidence
 
         # Step 2: Check if enhanced research is needed
