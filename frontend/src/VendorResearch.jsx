@@ -313,10 +313,10 @@ const VendorResearch = ({ vendorName, jsonData }) => {
 
         <div className="categorization-header">
           <span className="category-name">
-            {mlPrediction.category} - {mlPrediction.subcategory}
+            {mlPrediction.category || "Uncategorized"} - {mlPrediction.subcategory || "N/A"}
           </span>
-          <span className="category-tag" data-type={mlPrediction.ledgerType}>
-            {mlPrediction.ledgerType}
+          <span className="category-tag" data-type={mlPrediction.ledgerType || "Unknown"}>
+            {mlPrediction.ledgerType || "Unknown"}
           </span>
         </div>
 
@@ -400,27 +400,27 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           <div style={{
             padding: "0.25rem 0.75rem",
             borderRadius: "9999px",
-            backgroundColor: "#8b5cf6",
+            backgroundColor: getConfidenceColor((geminiCategorization.confidence || 0) / 100),
             color: "white",
             fontSize: "0.875rem",
             fontWeight: "600"
           }}>
-            AI Powered
+            {geminiCategorization.confidence || 0}% confident
           </div>
         </div>
 
         <div className="categorization-header">
           <span className="category-name">
-            {geminiCategorization.category} - {geminiCategorization.subcategory}
+            {geminiCategorization.category || "Uncategorized"} - {geminiCategorization.subcategory || "N/A"}
           </span>
-          <span className="category-tag" data-type={geminiCategorization.ledgerType}>
-            {geminiCategorization.ledgerType}
+          <span className="category-tag" data-type={geminiCategorization.ledgerType || "Unknown"}>
+            {geminiCategorization.ledgerType || "Unknown"}
           </span>
         </div>
 
         <div className="categorization-details" style={{ marginTop: "1rem" }}>
-          <p><strong>Company:</strong> {geminiCategorization.companyName}</p>
-          <p><strong>Description:</strong> {geminiCategorization.description}</p>
+          <p><strong>Company:</strong> {geminiCategorization.companyName || "Not specified"}</p>
+          <p><strong>Description:</strong> {geminiCategorization.description || "No description available"}</p>
 
           {geminiCategorization.explanation && (
             <div className="explanation-section" style={{ marginTop: "1rem" }}>
