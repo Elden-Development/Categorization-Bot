@@ -1497,7 +1497,16 @@ async def categorize_transaction_smart(
 
                 result["final_categorization"] = final_categorization
                 result["workflow"][-1]["status"] = "completed"
-                result["confidence_metrics"]["final_confidence"] = final_categorization.get("confidence", 0)
+                # Ensure confidence is a number
+                raw_final_conf = final_categorization.get("confidence", 0)
+                try:
+                    if isinstance(raw_final_conf, str):
+                        final_conf_value = float(''.join(c for c in raw_final_conf if c.isdigit() or c == '.') or '0')
+                    else:
+                        final_conf_value = float(raw_final_conf) if raw_final_conf else 0
+                except (ValueError, TypeError):
+                    final_conf_value = 0
+                result["confidence_metrics"]["final_confidence"] = final_conf_value
 
             except Exception as e:
                 result["workflow"][-1]["status"] = "error"
@@ -1512,7 +1521,15 @@ async def categorize_transaction_smart(
             result["confidence_metrics"]["final_confidence"] = confidence
 
         # Step 5: Determine if manual review is needed
-        final_confidence = result["confidence_metrics"]["final_confidence"]
+        # Ensure final_confidence is a number for comparison
+        raw_final = result["confidence_metrics"].get("final_confidence", 0)
+        try:
+            if isinstance(raw_final, str):
+                final_confidence = float(''.join(c for c in raw_final if c.isdigit() or c == '.') or '0')
+            else:
+                final_confidence = float(raw_final) if raw_final else 0
+        except (ValueError, TypeError):
+            final_confidence = 0
 
         # Flag for manual review if:
         # - Final confidence is still below threshold, OR
@@ -1521,7 +1538,7 @@ async def categorize_transaction_smart(
         recommended_action = safe_get(result, "enhanced_research", "recommendedAction", default="")
         red_flag_severity = safe_get(result, "enhanced_research", "redFlags", "severity", default="")
         needs_manual_review = (
-            final_confidence < request.confidence_threshold or
+            final_confidence < body.confidence_threshold or
             (recommended_action == "manual_review") or
             (red_flag_severity in ["medium", "high"])
         )
