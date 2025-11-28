@@ -1769,9 +1769,23 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
     # Parse and return the response
     try:
         categorization_json = json.loads(response.text)
+
+        # Ensure confidence is a valid number (Gemini sometimes returns it as string)
+        if "confidence" in categorization_json:
+            try:
+                conf_value = categorization_json["confidence"]
+                if isinstance(conf_value, str):
+                    # Remove any non-numeric characters and convert
+                    conf_value = ''.join(c for c in conf_value if c.isdigit() or c == '.')
+                categorization_json["confidence"] = float(conf_value) if conf_value else 50
+            except (ValueError, TypeError):
+                categorization_json["confidence"] = 50  # Default to 50% if parsing fails
+        else:
+            categorization_json["confidence"] = 50  # Default confidence if missing
+
         return categorization_json
     except json.JSONDecodeError:
-        return {"error": "Failed to parse Gemini response", "rawText": response.text}
+        return {"error": "Failed to parse Gemini response", "rawText": response.text, "confidence": 0}
 
 # Define request model for storing categorization
 class StoreCategorizationRequest(BaseModel):
