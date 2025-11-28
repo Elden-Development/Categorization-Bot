@@ -189,14 +189,13 @@ class MLCategorizationEngine:
         Returns:
         str: Unique transaction ID
         """
-        # Create a hash of key transaction attributes
-        doc_metadata = transaction_data.get("documentMetadata", {})
-        financial_data = transaction_data.get("financialData", {})
+        # Create a hash of key transaction attributes using safe access
+        doc_number = self._safe_get(transaction_data, "documentMetadata", "documentNumber", default="")
+        doc_date = self._safe_get(transaction_data, "documentMetadata", "documentDate", default="")
+        total_amount = self._safe_get(transaction_data, "financialData", "totalAmount", default="")
+        source_name = self._safe_get(transaction_data, "documentMetadata", "source", "name", default="")
 
-        unique_string = f"{doc_metadata.get('documentNumber', '')}_" \
-                       f"{doc_metadata.get('documentDate', '')}_" \
-                       f"{financial_data.get('totalAmount', '')}_" \
-                       f"{doc_metadata.get('source', {}).get('name', '')}"
+        unique_string = f"{doc_number}_{doc_date}_{total_amount}_{source_name}"
 
         # Add timestamp to ensure uniqueness
         unique_string += f"_{datetime.utcnow().isoformat()}"
@@ -558,15 +557,15 @@ class MLCategorizationEngine:
             # Prepare metadata for corrected version
             # Mark this as a user correction with higher learning weight
             metadata = {
-                "category": corrected_categorization.get("category", ""),
-                "subcategory": corrected_categorization.get("subcategory", ""),
-                "ledgerType": corrected_categorization.get("ledgerType", ""),
-                "companyName": corrected_categorization.get("companyName", ""),
-                "vendorName": transaction_data.get("documentMetadata", {}).get("source", {}).get("name", ""),
-                "documentType": transaction_data.get("documentMetadata", {}).get("documentType", ""),
-                "totalAmount": str(transaction_data.get("financialData", {}).get("totalAmount", "")),
-                "currency": transaction_data.get("financialData", {}).get("currency", "USD"),
-                "transactionText": transaction_text[:500],
+                "category": corrected_categorization.get("category", "") or "",
+                "subcategory": corrected_categorization.get("subcategory", "") or "",
+                "ledgerType": corrected_categorization.get("ledgerType", "") or "",
+                "companyName": corrected_categorization.get("companyName", "") or "",
+                "vendorName": self._safe_get(transaction_data, "documentMetadata", "source", "name", default="") or "",
+                "documentType": self._safe_get(transaction_data, "documentMetadata", "documentType", default="") or "",
+                "totalAmount": str(self._safe_get(transaction_data, "financialData", "totalAmount", default="") or ""),
+                "currency": self._safe_get(transaction_data, "financialData", "currency", default="USD") or "USD",
+                "transactionText": transaction_text[:500] if transaction_text else "",
                 "timestamp": datetime.utcnow().isoformat(),
                 "userFeedback": "user_correction",
                 "transactionPurpose": transaction_purpose[:200] if transaction_purpose else "",

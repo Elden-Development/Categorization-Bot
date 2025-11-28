@@ -32,6 +32,24 @@ import models
 # Load environment variables from .env file
 load_dotenv()
 
+# Helper function to safely navigate nested dicts/lists
+def safe_get(data, *keys, default=None):
+    """
+    Safely navigate nested dicts/lists, returning default if any key fails.
+    This prevents 'list indices must be integers' errors when data structure varies.
+    """
+    result = data
+    for key in keys:
+        if result is None:
+            return default
+        if isinstance(result, dict):
+            result = result.get(key)
+        elif isinstance(result, list) and isinstance(key, int) and 0 <= key < len(result):
+            result = result[key]
+        else:
+            return default
+    return result if result is not None else default
+
 app = FastAPI(title="Categorization Bot API", version="1.0.0")
 
 # Initialize rate limiter - TEMPORARILY DISABLED due to conflicts with Pydantic request models
@@ -387,7 +405,8 @@ def detect_document_type(json_data):
     str: Document type - 'invoice', 'receipt', 'payment_processing', 'bank_statement', or 'other'
     """
     # Get the document type from metadata if available
-    doc_type = json_data.get("documentMetadata", {}).get("documentType", "").lower()
+    doc_type_raw = safe_get(json_data, "documentMetadata", "documentType", default="")
+    doc_type = str(doc_type_raw).lower() if doc_type_raw else ""
     
     # Check for specific document type indicators
     if doc_type in ["merchantstatement", "merchant_statement", "payment_processing_statement", 
@@ -799,8 +818,8 @@ async def process_file(
                     document_id=document_id,
                     user_id=current_user.id,
                     parsed_data=parsed_data,
-                    extraction_verified=parsed_data.get("extractionVerification", {}).get("extractionVerified", False),
-                    verification_data=parsed_data.get("extractionVerification")
+                    extraction_verified=safe_get(parsed_data, "extractionVerification", "extractionVerified", default=False),
+                    verification_data=safe_get(parsed_data, "extractionVerification")
                 )
 
                 # Update status to completed
@@ -813,25 +832,29 @@ async def process_file(
                 )
 
                 # Extract and save transactions
-                vendor_name = parsed_data.get("partyInformation", {}).get("vendor", {}).get("name")
-                line_items = parsed_data.get("lineItems", [])
+                vendor_name = safe_get(parsed_data, "partyInformation", "vendor", "name")
+                line_items = safe_get(parsed_data, "lineItems", default=[])
+                if not isinstance(line_items, list):
+                    line_items = []
 
                 # If we have line items, save them as transactions
                 if line_items:
                     for idx, item in enumerate(line_items):
                         try:
                             transaction_id = f"{document_id}-{idx}"
+                            item_desc = item.get("description") if isinstance(item, dict) else None
+                            item_price = item.get("totalPrice", 0) if isinstance(item, dict) else 0
                             crud.create_transaction(
                                 db=db,
                                 user_id=current_user.id,
                                 document_id=db_document.id,
                                 transaction_id=transaction_id,
-                                vendor_name=vendor_name or item.get("description"),
-                                amount=float(item.get("totalPrice", 0) or 0),
-                                transaction_date=parsed_data.get("documentMetadata", {}).get("documentDate"),
-                                description=item.get("description"),
-                                transaction_type=parsed_data.get("documentMetadata", {}).get("documentType"),
-                                line_items=[item]
+                                vendor_name=vendor_name or item_desc,
+                                amount=float(item_price or 0),
+                                transaction_date=safe_get(parsed_data, "documentMetadata", "documentDate"),
+                                description=item_desc,
+                                transaction_type=safe_get(parsed_data, "documentMetadata", "documentType"),
+                                line_items=[item] if isinstance(item, dict) else []
                             )
                         except Exception as e:
                             print(f"Warning: Failed to save transaction {idx}: {e}")
@@ -1130,9 +1153,9 @@ async def research_vendor_enhanced(
                         user_id=current_user.id,
                         vendor_name=vendor_name,
                         research_data=research_data,
-                        company_name=research_data.get("vendorIdentification", {}).get("primaryName", vendor_name),
-                        description=research_data.get("summary", ""),
-                        confidence_score=research_data.get("overallConfidence", 0)
+                        company_name=safe_get(research_data, "vendorIdentification", "primaryName", default=vendor_name),
+                        description=research_data.get("summary", "") if isinstance(research_data, dict) else "",
+                        confidence_score=research_data.get("overallConfidence", 0) if isinstance(research_data, dict) else 0
                     )
 
                     # Log activity
@@ -1451,16 +1474,18 @@ async def categorize_transaction_smart(
                 })
 
                 # Create enhanced vendor info string
+                typical_cats = safe_get(enhanced_research, 'categorizationGuidance', 'typicalCategories', default=[])
+                typical_cats_str = ', '.join(typical_cats) if isinstance(typical_cats, list) else str(typical_cats)
                 enhanced_vendor_info = f"""
                 Vendor: {vendor_name}
 
                 Research Findings:
-                - Official Name: {enhanced_research.get('vendorIdentification', {}).get('primaryName', vendor_name)}
-                - Industry: {enhanced_research.get('businessProfile', {}).get('industry', 'Unknown')}
-                - Business Type: {enhanced_research.get('businessProfile', {}).get('businessType', 'Unknown')}
-                - Summary: {enhanced_research.get('summary', 'No summary available')}
-                - Typical Categories: {', '.join(enhanced_research.get('categorizationGuidance', {}).get('typicalCategories', []))}
-                - Research Confidence: {enhanced_research.get('overallConfidence', 0)}%
+                - Official Name: {safe_get(enhanced_research, 'vendorIdentification', 'primaryName', default=vendor_name)}
+                - Industry: {safe_get(enhanced_research, 'businessProfile', 'industry', default='Unknown')}
+                - Business Type: {safe_get(enhanced_research, 'businessProfile', 'businessType', default='Unknown')}
+                - Summary: {enhanced_research.get('summary', 'No summary available') if isinstance(enhanced_research, dict) else 'No summary available'}
+                - Typical Categories: {typical_cats_str}
+                - Research Confidence: {enhanced_research.get('overallConfidence', 0) if isinstance(enhanced_research, dict) else 0}%
                 """
 
                 # Re-categorize with enhanced context
@@ -1493,10 +1518,12 @@ async def categorize_transaction_smart(
         # - Final confidence is still below threshold, OR
         # - Research recommended manual review, OR
         # - Red flags were detected
+        recommended_action = safe_get(result, "enhanced_research", "recommendedAction", default="")
+        red_flag_severity = safe_get(result, "enhanced_research", "redFlags", "severity", default="")
         needs_manual_review = (
             final_confidence < request.confidence_threshold or
-            (result.get("enhanced_research", {}).get("recommendedAction") == "manual_review") or
-            (result.get("enhanced_research", {}).get("redFlags", {}).get("severity") in ["medium", "high"])
+            (recommended_action == "manual_review") or
+            (red_flag_severity in ["medium", "high"])
         )
 
         result["needs_manual_review"] = needs_manual_review
@@ -2224,13 +2251,15 @@ async def reconcile_documents(
             try:
                 for match in results.get("matched", []):
                     # Find transaction and bank transaction in database
+                    doc_id = safe_get(match, "document", "id", default="")
+                    bank_tx_id = safe_get(match, "bank_transaction", "id", default=None)
                     db_transaction = crud.get_transaction_by_id(
-                        db, match.get("document", {}).get("id", ""), current_user.id
+                        db, doc_id, current_user.id
                     )
                     db_bank_transaction = db.query(models.BankTransaction).filter(
                         models.BankTransaction.user_id == current_user.id,
-                        models.BankTransaction.id == match.get("bank_transaction", {}).get("id")
-                    ).first()
+                        models.BankTransaction.id == bank_tx_id
+                    ).first() if bank_tx_id else None
 
                     if db_transaction and db_bank_transaction:
                         # Create reconciliation match
