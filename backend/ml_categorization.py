@@ -414,7 +414,7 @@ class MLCategorizationEngine:
                 "examples": winner["examples"][:5],  # Top 5 examples
                 "allSimilarTransactions": len(similar_transactions),
                 "votingBreakdown": {
-                    k: {
+                    f"{v['category']}|{v['subcategory']}|{v['ledgerType']}": {
                         "category": v["category"],
                         "subcategory": v["subcategory"],
                         "count": v["count"],
@@ -464,11 +464,20 @@ class MLCategorizationEngine:
         """
         try:
             stats = self.index.describe_index_stats()
+
+            # Convert namespaces to plain dict (Pinecone objects aren't JSON serializable)
+            namespaces_dict = {}
+            if stats.namespaces:
+                for ns_name, ns_stats in stats.namespaces.items():
+                    namespaces_dict[ns_name] = {
+                        "vector_count": ns_stats.vector_count if hasattr(ns_stats, 'vector_count') else 0
+                    }
+
             return {
                 "totalTransactions": stats.total_vector_count,
                 "dimension": stats.dimension,
                 "indexFullness": stats.index_fullness,
-                "namespaces": stats.namespaces
+                "namespaces": namespaces_dict
             }
         except Exception as e:
             print(f"Error getting database stats: {str(e)}")

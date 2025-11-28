@@ -5,7 +5,7 @@ python-multipart>=0.0.12
 pydantic[email]>=2.10.0  # Include email validation support
 
 # Google Gemini AI
-google-genai>=0.2.0
+google-genai>=0.4.0
 
 # PDF Processing
 PyPDF2>=3.0.1
