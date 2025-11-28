@@ -221,20 +221,32 @@ class MLCategorizationEngine:
             # Generate embedding
             embedding = await self.generate_embedding(transaction_text)
 
+            # Helper to safely get nested values and convert None to empty string
+            def safe_get(data, *keys, default=""):
+                """Safely navigate nested dicts, returning default if any key is missing or value is None."""
+                result = data
+                for key in keys:
+                    if isinstance(result, dict):
+                        result = result.get(key)
+                    else:
+                        return default
+                return default if result is None else result
+
             # Prepare metadata (Pinecone has limits on metadata size)
+            # All values must be string, number, boolean, or list of strings - never None
             metadata = {
-                "category": categorization.get("category", ""),
-                "subcategory": categorization.get("subcategory", ""),
-                "ledgerType": categorization.get("ledgerType", ""),
-                "companyName": categorization.get("companyName", ""),
-                "vendorName": transaction_data.get("documentMetadata", {}).get("source", {}).get("name", ""),
-                "documentType": transaction_data.get("documentMetadata", {}).get("documentType", ""),
-                "totalAmount": str(transaction_data.get("financialData", {}).get("totalAmount", "")),
-                "currency": transaction_data.get("financialData", {}).get("currency", "USD"),
-                "transactionText": transaction_text[:500],  # Truncate to fit metadata limits
+                "category": safe_get(categorization, "category") or "",
+                "subcategory": safe_get(categorization, "subcategory") or "",
+                "ledgerType": safe_get(categorization, "ledgerType") or "",
+                "companyName": safe_get(categorization, "companyName") or "",
+                "vendorName": safe_get(transaction_data, "documentMetadata", "source", "name") or "",
+                "documentType": safe_get(transaction_data, "documentMetadata", "documentType") or "",
+                "totalAmount": str(safe_get(transaction_data, "financialData", "totalAmount") or ""),
+                "currency": safe_get(transaction_data, "financialData", "currency") or "USD",
+                "transactionText": (transaction_text[:500] if transaction_text else ""),
                 "timestamp": datetime.utcnow().isoformat(),
                 "userFeedback": user_feedback or "none",
-                "transactionPurpose": transaction_purpose[:200] if transaction_purpose else ""
+                "transactionPurpose": (transaction_purpose[:200] if transaction_purpose else "")
             }
 
             # Store in Pinecone
