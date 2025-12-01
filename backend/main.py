@@ -160,6 +160,84 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+
+# =============================================================================
+# HEALTH CHECK ENDPOINTS
+# =============================================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint - basic API info"""
+    return {
+        "name": "Categorization Bot API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/docs"
+    }
+
+
+@app.get("/health")
+async def health_check(db: Session = Depends(get_db)):
+    """
+    Health check endpoint for monitoring and deployment verification.
+
+    Returns status of all critical services:
+    - API server
+    - Database connection
+    - Gemini API
+    - Pinecone (ML engine)
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "api": {"status": "up"},
+            "database": {"status": "unknown"},
+            "gemini": {"status": "unknown"},
+            "pinecone": {"status": "unknown"}
+        }
+    }
+
+    # Check database
+    try:
+        if test_connection():
+            health_status["services"]["database"] = {"status": "up"}
+        else:
+            health_status["services"]["database"] = {"status": "down", "error": "Connection failed"}
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["services"]["database"] = {"status": "down", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Check Gemini API
+    try:
+        if GEMINI_API_KEY:
+            # Quick test - just verify client is initialized
+            health_status["services"]["gemini"] = {"status": "configured"}
+        else:
+            health_status["services"]["gemini"] = {"status": "not_configured", "error": "API key missing"}
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["services"]["gemini"] = {"status": "error", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Check Pinecone
+    try:
+        if PINECONE_API_KEY:
+            health_status["services"]["pinecone"] = {"status": "configured"}
+        else:
+            health_status["services"]["pinecone"] = {"status": "not_configured", "note": "ML features disabled"}
+    except Exception as e:
+        health_status["services"]["pinecone"] = {"status": "error", "error": str(e)}
+
+    return health_status
+
+
+@app.get("/health/quick")
+async def health_check_quick():
+    """Quick health check - just returns OK if server is running"""
+    return {"status": "ok"}
+
 # Initialize ML Engine (lazy initialization on first use)
 ml_engine = None
 

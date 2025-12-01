@@ -34,3 +34,7 @@ passlib>=1.7.4  # Password hashing
 python-jose[cryptography]>=3.3.0  # JWT tokens
 bcrypt>=4.1.0  # Password encryption
 slowapi>=0.1.9  # API rate limiting
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
