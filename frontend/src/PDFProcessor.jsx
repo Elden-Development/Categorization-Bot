@@ -142,8 +142,9 @@ const PDFProcessor = () => {
           } else if (errorData.error) {
             errorMessage = errorData.error;
           }
-        } catch {
+        } catch (e) {
           // If we can't parse error response, use the status message
+          console.warn('Could not parse error response:', e);
         }
         throw new Error(errorMessage);
       }
@@ -160,7 +161,7 @@ const PDFProcessor = () => {
       try {
         jsonData = JSON.parse(data.response);
       } catch (parseError) {
-        throw new Error(`Failed to parse server response: ${parseError.message}`)
+        throw new Error(`Failed to parse server response: ${parseError.message}`);
       }
 
       // Check if the parsed data contains an error
