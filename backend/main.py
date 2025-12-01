@@ -50,6 +50,70 @@ def safe_get(data, *keys, default=None):
             return default
     return result if result is not None else default
 
+
+# Retry helper for API calls with rate limiting
+async def retry_with_backoff(func, max_retries=3, initial_delay=2):
+    """
+    Retry an async function with exponential backoff.
+    Specifically handles 429 RESOURCE_EXHAUSTED errors from Gemini API.
+
+    Args:
+        func: Async function to call (should be a coroutine or awaitable)
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds (doubles each retry)
+
+    Returns:
+        The result of the function call
+
+    Raises:
+        Exception: Re-raises the last exception if all retries fail
+    """
+    last_exception = None
+    delay = initial_delay
+
+    for attempt in range(max_retries + 1):
+        try:
+            # If func is a coroutine, await it; otherwise call it
+            if asyncio.iscoroutine(func):
+                return await func
+            else:
+                return await func()
+        except Exception as e:
+            last_exception = e
+            error_str = str(e)
+
+            # Check if it's a rate limit error (429)
+            is_rate_limit = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+
+            if is_rate_limit and attempt < max_retries:
+                print(f"Rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                # Not a rate limit error or out of retries
+                raise
+
+    raise last_exception
+
+
+def get_user_friendly_error(error: Exception) -> str:
+    """Convert API errors to user-friendly messages."""
+    error_str = str(error)
+
+    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+        return "Service is temporarily busy. Please wait a moment and try again."
+    elif "401" in error_str or "UNAUTHENTICATED" in error_str:
+        return "API authentication error. Please contact support."
+    elif "403" in error_str or "PERMISSION_DENIED" in error_str:
+        return "API access denied. Please contact support."
+    elif "500" in error_str or "INTERNAL" in error_str:
+        return "The AI service is experiencing issues. Please try again later."
+    elif "timeout" in error_str.lower():
+        return "Request timed out. Please try again."
+    else:
+        return "An error occurred while processing your request. Please try again."
+
+
 app = FastAPI(title="Categorization Bot API", version="1.0.0")
 
 # Initialize rate limiter - TEMPORARILY DISABLED due to conflicts with Pydantic request models
@@ -1088,19 +1152,22 @@ async def research_vendor(
         google_search_tool = types.Tool(
             google_search=types.GoogleSearch()
         )
-        
-        # Send the request to Gemini API with search enabled
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[google_search_tool],
-                response_modalities=["TEXT"],
-                temperature=0.2, # Lower temperature to make response more focused
+
+        # Send the request to Gemini API with search enabled (with retry for rate limits)
+        async def make_api_call():
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[google_search_tool],
+                    response_modalities=["TEXT"],
+                    temperature=0.2,  # Lower temperature to make response more focused
+                )
             )
-        )
-        
+
+        response = await retry_with_backoff(make_api_call, max_retries=3, initial_delay=2)
+
         # Save result to database if user is authenticated
         if current_user:
             try:
@@ -1129,7 +1196,9 @@ async def research_vendor(
 
     except Exception as e:
         print(f"Error researching vendor: {str(e)}")
-        return {"error": f"Error researching vendor: {str(e)}"}
+        # Return user-friendly error message
+        friendly_error = get_user_friendly_error(e)
+        return {"error": friendly_error}
 
 # Enhanced vendor research for ambiguous cases
 class EnhancedResearchRequest(BaseModel):
@@ -1242,18 +1311,21 @@ async def research_vendor_enhanced(
             google_search=types.GoogleSearch()
         )
 
-        # Send the request to Gemini API with search enabled
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[google_search_tool],
-                response_modalities=["TEXT"],
-                response_mime_type="application/json",
-                temperature=0.2,
+        # Send the request to Gemini API with search enabled (with retry for rate limits)
+        async def make_enhanced_api_call():
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[google_search_tool],
+                    response_modalities=["TEXT"],
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                )
             )
-        )
+
+        response = await retry_with_backoff(make_enhanced_api_call, max_retries=3, initial_delay=2)
 
         # Parse the response
         try:
@@ -1302,7 +1374,9 @@ async def research_vendor_enhanced(
 
     except Exception as e:
         print(f"Error in enhanced vendor research: {str(e)}")
-        return {"error": f"Error in enhanced vendor research: {str(e)}"}
+        # Return user-friendly error message
+        friendly_error = get_user_friendly_error(e)
+        return {"error": friendly_error}
 
 
 # Define request model for financial categorization
