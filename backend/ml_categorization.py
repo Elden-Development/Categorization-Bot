@@ -353,6 +353,30 @@ class MLCategorizationEngine:
         Returns:
         Dict: Prediction result with category, confidence, and supporting evidence
         """
+        # Validate input - handle case where transaction_data is a list
+        if isinstance(transaction_data, list):
+            if len(transaction_data) > 0 and isinstance(transaction_data[0], dict):
+                transaction_data = transaction_data[0]
+            else:
+                return {
+                    "hasPrediction": False,
+                    "confidence": 0.0,
+                    "reason": "Invalid transaction data format",
+                    "category": None,
+                    "subcategory": None,
+                    "ledgerType": None
+                }
+
+        if not isinstance(transaction_data, dict):
+            return {
+                "hasPrediction": False,
+                "confidence": 0.0,
+                "reason": "Transaction data must be a dictionary",
+                "category": None,
+                "subcategory": None,
+                "ledgerType": None
+            }
+
         try:
             # Find similar transactions
             similar_transactions = await self.find_similar_transactions(

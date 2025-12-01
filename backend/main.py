@@ -1881,6 +1881,16 @@ async def categorize_transaction_hybrid(request: HybridCategorizationRequest):
     if not vendor_info or not document_data:
         return {"error": "Missing required information"}
 
+    # Ensure document_data is a dict, not a list
+    if isinstance(document_data, list):
+        if len(document_data) > 0 and isinstance(document_data[0], dict):
+            document_data = document_data[0]  # Take first item
+        else:
+            return {"error": "Invalid document data format - expected object, got list"}
+
+    if not isinstance(document_data, dict):
+        return {"error": "Invalid document data format - expected object"}
+
     try:
         # Get ML engine
         engine = get_ml_categorization_engine()
@@ -2066,6 +2076,17 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
     # Parse and return the response
     try:
         categorization_json = json.loads(response.text)
+
+        # Handle case where Gemini returns a list instead of dict
+        if isinstance(categorization_json, list):
+            if len(categorization_json) > 0 and isinstance(categorization_json[0], dict):
+                categorization_json = categorization_json[0]  # Take first item if it's a dict
+            else:
+                return {"error": "Unexpected response format from AI", "confidence": 0}
+
+        # Ensure we have a dict
+        if not isinstance(categorization_json, dict):
+            return {"error": "Invalid response format from AI", "confidence": 0}
 
         # Ensure confidence is a valid number (Gemini sometimes returns it as string)
         if "confidence" in categorization_json:
