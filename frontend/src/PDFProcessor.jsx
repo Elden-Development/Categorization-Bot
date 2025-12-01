@@ -131,12 +131,42 @@ const PDFProcessor = () => {
 
       updateDocumentStatus(docId, 'processing', 75);
 
+      // Handle HTTP errors
       if (!res.ok) {
-        throw new Error(`Server responded with status: ${res.status}`);
+        let errorMessage = `Server responded with status: ${res.status}`;
+        try {
+          const errorData = await res.json();
+          // FastAPI returns error details in 'detail' field
+          if (errorData.detail) {
+            errorMessage = errorData.detail;
+          } else if (errorData.error) {
+            errorMessage = errorData.error;
+          }
+        } catch {
+          // If we can't parse error response, use the status message
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await res.json();
-      const jsonData = JSON.parse(data.response);
+
+      // Validate that response field exists and is not undefined/null
+      if (!data.response || data.response === 'undefined' || data.response === 'null') {
+        throw new Error('Server returned empty or invalid response. The document may be unreadable.');
+      }
+
+      // Parse the JSON response with error handling
+      let jsonData;
+      try {
+        jsonData = JSON.parse(data.response);
+      } catch (parseError) {
+        throw new Error(`Failed to parse server response: ${parseError.message}`)
+      }
+
+      // Check if the parsed data contains an error
+      if (jsonData && jsonData.error) {
+        throw new Error(jsonData.detail || jsonData.error);
+      }
 
       updateDocumentStatus(docId, 'processing', 85);
 

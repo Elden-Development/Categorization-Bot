@@ -670,24 +670,43 @@ def merge_page_results(page_results):
     For list fields, we concatenate them, regardless of where they appear in the JSON structure.
     """
     merged = None
-    
+    failed_pages = 0
+
     # Process each page
-    for result in page_results:
+    for idx, result in enumerate(page_results):
+        # Handle None or empty results
+        if result is None or result == "":
+            print(f"Warning: Page {idx + 1} returned empty result")
+            failed_pages += 1
+            continue
+
         try:
             data = json.loads(result)
-        except json.JSONDecodeError:
-            continue  # Optionally log or handle the error
-            
+        except json.JSONDecodeError as e:
+            print(f"Warning: Page {idx + 1} JSON decode error: {e}")
+            failed_pages += 1
+            continue
+
         if merged is None:
             merged = data
         else:
             # Use deep merge to recursively combine the data
             merged = deep_merge(merged, data)
-    
+
+    # If all pages failed, return an error structure instead of None
+    if merged is None:
+        print(f"Error: All {len(page_results)} pages failed to parse")
+        return {
+            "error": "Failed to extract data from document",
+            "detail": f"All {len(page_results)} page(s) failed to parse. The document may be scanned/image-based or contain unreadable content.",
+            "failed_pages": failed_pages,
+            "total_pages": len(page_results)
+        }
+
     # Remove any extractionVerification fields - we'll perform a new verification on the complete document
     if merged and "extractionVerification" in merged:
         del merged["extractionVerification"]
-            
+
     return merged
 
 @app.post("/process-pdf")
@@ -760,13 +779,30 @@ async def process_file(
             # Process each page concurrently using the per-page processing function.
             tasks = [process_page(page, schema) for page in pdf_reader.pages]
             page_results = await asyncio.gather(*tasks)
-            
+
             # Merge the JSON results from each page.
             merged_result = merge_page_results(page_results)
-            
+
+            # Check if merge_page_results returned an error
+            if merged_result and isinstance(merged_result, dict) and "error" in merged_result:
+                error_detail = merged_result.get("detail", "Failed to extract data from document")
+                # Update document status to error if user is authenticated
+                if current_user and db_document:
+                    try:
+                        crud.update_document_status(
+                            db=db,
+                            document_id=document_id,
+                            user_id=current_user.id,
+                            status="error",
+                            error_message=error_detail
+                        )
+                    except:
+                        pass
+                raise HTTPException(status_code=422, detail=error_detail)
+
             # Perform extraction verification on the complete document
             final_result = await verify_extraction(merged_result)
-            
+
             combined_response_text = json.dumps(final_result, indent=2)
         else:
             # For non-PDF files, process with schema selection
@@ -784,10 +820,26 @@ async def process_file(
                 }
             )
             raw_text = raw_response.text
-            
+
+            # Check if raw text extraction failed
+            if not raw_text or raw_text.strip() == "":
+                error_detail = "Failed to extract text from image. The image may be unreadable or contain no text."
+                if current_user and db_document:
+                    try:
+                        crud.update_document_status(
+                            db=db,
+                            document_id=document_id,
+                            user_id=current_user.id,
+                            status="error",
+                            error_message=error_detail
+                        )
+                    except:
+                        pass
+                raise HTTPException(status_code=422, detail=error_detail)
+
             # Use schema-specific prompt template
             json_prompt = generate_schema_prompt(schema, raw_text)
-            
+
             json_response = await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.0-flash",
@@ -797,14 +849,42 @@ async def process_file(
                     "response_mime_type": "application/json"
                 }
             )
-            
+
+            # Validate Gemini response
+            if not json_response or not json_response.text or json_response.text.strip() == "":
+                error_detail = "AI model returned empty response. Please try again or use a different document."
+                if current_user and db_document:
+                    try:
+                        crud.update_document_status(
+                            db=db,
+                            document_id=document_id,
+                            user_id=current_user.id,
+                            status="error",
+                            error_message=error_detail
+                        )
+                    except:
+                        pass
+                raise HTTPException(status_code=422, detail=error_detail)
+
             # For non-PDF files (single page), add extraction verification
             try:
                 json_data = json.loads(json_response.text)
                 final_json = await verify_extraction(json_data)
                 combined_response_text = json.dumps(final_json, indent=2)
-            except json.JSONDecodeError:
-                combined_response_text = json_response.text
+            except json.JSONDecodeError as e:
+                error_detail = f"Failed to parse AI response as JSON: {str(e)}"
+                if current_user and db_document:
+                    try:
+                        crud.update_document_status(
+                            db=db,
+                            document_id=document_id,
+                            user_id=current_user.id,
+                            status="error",
+                            error_message=error_detail
+                        )
+                    except:
+                        pass
+                raise HTTPException(status_code=422, detail=error_detail)
 
         # Save final result to database if user is authenticated
         if current_user and db_document:
@@ -883,11 +963,48 @@ async def process_file(
                     except:
                         pass
 
+        # Final validation - ensure we have valid response data
+        if not combined_response_text or combined_response_text.strip() == "" or combined_response_text.strip() == "null":
+            error_detail = "Document processing completed but no data was extracted. The document may be empty or unreadable."
+            if current_user and db_document:
+                try:
+                    crud.update_document_status(
+                        db=db,
+                        document_id=document_id,
+                        user_id=current_user.id,
+                        status="error",
+                        error_message=error_detail
+                    )
+                except:
+                    pass
+            raise HTTPException(status_code=422, detail=error_detail)
+
+        # Validate that response is valid JSON before returning
+        try:
+            json.loads(combined_response_text)
+        except json.JSONDecodeError:
+            error_detail = "Document processing completed but response is not valid JSON."
+            if current_user and db_document:
+                try:
+                    crud.update_document_status(
+                        db=db,
+                        document_id=document_id,
+                        user_id=current_user.id,
+                        status="error",
+                        error_message=error_detail
+                    )
+                except:
+                    pass
+            raise HTTPException(status_code=422, detail=error_detail)
+
         # Return the merged Gemini response with document ID
         return {
             "response": combined_response_text.strip(),
             "document_id": document_id if current_user else None
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         # Update document status to error if user is authenticated
         if current_user and db_document:
