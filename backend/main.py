@@ -645,6 +645,10 @@ async def verify_extraction(json_data):
         return json_data
 
 async def process_page(page, schema="generic"):
+    """
+    Process a single PDF page and extract structured data.
+    Includes retry logic for rate limits and proper error handling.
+    """
     # Write the individual page to a BytesIO stream.
     pdf_writer = PdfWriter()
     pdf_writer.add_page(page)
@@ -652,38 +656,71 @@ async def process_page(page, schema="generic"):
     pdf_writer.write(page_stream)
     page_stream.seek(0)
 
+    page_bytes = page_stream.getvalue()
+    print(f"Processing PDF page, size: {len(page_bytes)} bytes")
+
     # Create a Gemini Part from the page bytes.
     file_part = types.Part.from_bytes(
-        data=page_stream.getvalue(),
+        data=page_bytes,
         mime_type="application/pdf"
     )
 
-    # Step 1: Extract raw text from the page.
-    raw_response = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash",
-        contents=[RAW_PROMPT, file_part],
-        config={
-            "max_output_tokens": 40000,
-            "response_mime_type": "text/plain"
-        }
-    )
-    raw_text = raw_response.text
+    # Step 1: Extract raw text from the page (with retry for rate limits)
+    async def extract_raw_text():
+        return await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.0-flash",
+            contents=[RAW_PROMPT, file_part],
+            config={
+                "max_output_tokens": 40000,
+                "response_mime_type": "text/plain"
+            }
+        )
+
+    try:
+        raw_response = await retry_with_backoff(extract_raw_text, max_retries=3, initial_delay=2)
+    except Exception as e:
+        print(f"Error extracting raw text from PDF page: {str(e)}")
+        # Return error JSON that merge_page_results can handle
+        return json.dumps({"error": f"Failed to extract text: {get_user_friendly_error(e)}"})
+
+    raw_text = raw_response.text if raw_response else ""
+    print(f"Raw text extracted, length: {len(raw_text) if raw_text else 0} chars")
+
+    # Check if raw text extraction returned empty
+    if not raw_text or raw_text.strip() == "":
+        print("Warning: Gemini returned empty text for PDF page")
+        return json.dumps({"error": "No text could be extracted from this page"})
 
     # Step 2: Convert the raw text into structured JSON using the schema-specific prompt
     json_prompt = generate_schema_prompt(schema, raw_text)
-    json_response = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash",
-        contents=[json_prompt],
-        config={
-            "max_output_tokens": 40000,
-            "response_mime_type": "application/json"
-        }
-    )
-    
+
+    async def convert_to_json():
+        return await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.0-flash",
+            contents=[json_prompt],
+            config={
+                "max_output_tokens": 40000,
+                "response_mime_type": "application/json"
+            }
+        )
+
+    try:
+        json_response = await retry_with_backoff(convert_to_json, max_retries=3, initial_delay=2)
+    except Exception as e:
+        print(f"Error converting to JSON: {str(e)}")
+        return json.dumps({"error": f"Failed to structure data: {get_user_friendly_error(e)}"})
+
+    result = json_response.text if json_response else ""
+    print(f"JSON response generated, length: {len(result) if result else 0} chars")
+
+    if not result or result.strip() == "":
+        print("Warning: Gemini returned empty JSON response")
+        return json.dumps({"error": "Failed to generate structured data from page"})
+
     # Return the JSON response to be merged later
-    return json_response.text
+    return result
 
 def deep_merge(base, addition):
     """
@@ -735,6 +772,7 @@ def merge_page_results(page_results):
     """
     merged = None
     failed_pages = 0
+    error_messages = []
 
     # Process each page
     for idx, result in enumerate(page_results):
@@ -742,6 +780,7 @@ def merge_page_results(page_results):
         if result is None or result == "":
             print(f"Warning: Page {idx + 1} returned empty result")
             failed_pages += 1
+            error_messages.append(f"Page {idx + 1}: Empty result")
             continue
 
         try:
@@ -749,6 +788,14 @@ def merge_page_results(page_results):
         except json.JSONDecodeError as e:
             print(f"Warning: Page {idx + 1} JSON decode error: {e}")
             failed_pages += 1
+            error_messages.append(f"Page {idx + 1}: Invalid JSON")
+            continue
+
+        # Check if the page returned an error object
+        if isinstance(data, dict) and "error" in data:
+            print(f"Warning: Page {idx + 1} returned error: {data.get('error')}")
+            failed_pages += 1
+            error_messages.append(f"Page {idx + 1}: {data.get('error')}")
             continue
 
         if merged is None:
@@ -760,9 +807,17 @@ def merge_page_results(page_results):
     # If all pages failed, return an error structure instead of None
     if merged is None:
         print(f"Error: All {len(page_results)} pages failed to parse")
+        # Provide more specific error message
+        if error_messages:
+            detail = "; ".join(error_messages[:3])  # Show first 3 errors
+            if len(error_messages) > 3:
+                detail += f" (and {len(error_messages) - 3} more)"
+        else:
+            detail = "The document may be scanned/image-based or contain unreadable content."
+
         return {
             "error": "Failed to extract data from document",
-            "detail": f"All {len(page_results)} page(s) failed to parse. The document may be scanned/image-based or contain unreadable content.",
+            "detail": detail,
             "failed_pages": failed_pages,
             "total_pages": len(page_results)
         }
