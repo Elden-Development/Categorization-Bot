@@ -4,8 +4,16 @@ import VendorResearch from "./VendorResearch";
 import SchemaSelector from "./SchemaSelector";
 import BankReconciliation from "./BankReconciliation";
 import DocumentList from "./DocumentList";
+import BatchProgressBar from "./BatchProgressBar";
+import ExportPanel from "./ExportPanel";
+import { useAuth } from "./AuthContext";
 
 const PDFProcessor = () => {
+  // Auth context - always call the hook unconditionally
+  const authContext = useAuth();
+  const token = authContext?.token || null;
+  const user = authContext?.user || null;
+
   // Batch processing state
   const [documents, setDocuments] = useState([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState(null);
@@ -16,6 +24,11 @@ const PDFProcessor = () => {
   const [bankFile, setBankFile] = useState(null);
   const [reconciliationResults, setReconciliationResults] = useState(null);
   const [reconciliationLoading, setReconciliationLoading] = useState(false);
+
+  // Bank statement batch categorization state
+  const [bankStatementId, setBankStatementId] = useState(null);
+  const [showBatchProgress, setShowBatchProgress] = useState(false);
+  const [batchCategorizationComplete, setBatchCategorizationComplete] = useState(false);
 
   // UI state
   const [dragActive, setDragActive] = useState(false);
@@ -617,6 +630,99 @@ const PDFProcessor = () => {
     }
   };
 
+  // Upload bank statement to database and get statement ID (requires auth)
+  const uploadBankStatementToDatabase = async () => {
+    if (!bankFile || !token) {
+      return null;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("file", bankFile);
+
+      // Use the parse-bank-statement endpoint which saves to DB when authenticated
+      const response = await fetch(`${API_BASE_URL}/parse-bank-statement`, {
+        method: "POST",
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `Upload failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || "Failed to parse bank statement");
+      }
+
+      // The endpoint returns statement_id when user is authenticated
+      if (!data.statement_id) {
+        throw new Error("No statement ID returned. Please ensure you are logged in.");
+      }
+
+      return data.statement_id;
+    } catch (error) {
+      console.error("Error uploading bank statement:", error);
+      throw error;
+    }
+  };
+
+  // Handle batch categorize button click
+  const handleBatchCategorize = async () => {
+    if (!token) {
+      alert("Please log in to use batch categorization.");
+      return;
+    }
+
+    if (!bankFile) {
+      alert("Please select a bank statement file first.");
+      return;
+    }
+
+    try {
+      setMessage("Uploading bank statement...");
+
+      // Upload bank statement to database if not already uploaded
+      let statementId = bankStatementId;
+      if (!statementId) {
+        statementId = await uploadBankStatementToDatabase();
+        setBankStatementId(statementId);
+      }
+
+      if (statementId) {
+        setShowBatchProgress(true);
+        setBatchCategorizationComplete(false);
+        setMessage("Starting batch categorization...");
+      }
+    } catch (error) {
+      setMessage(`Error: ${error.message}`);
+      alert("Failed to start batch categorization: " + error.message);
+    }
+  };
+
+  // Handle batch categorization completion
+  const handleBatchComplete = (data) => {
+    setBatchCategorizationComplete(true);
+    setMessage(`Batch categorization complete! ${data.processed || 0} transactions processed.`);
+
+    // Optionally refresh the page or update state to show results
+    if (data.results) {
+      console.log("Batch results:", data.results);
+    }
+  };
+
+  // Handle batch categorization cancel
+  const handleBatchCancel = () => {
+    setShowBatchProgress(false);
+    setBankStatementId(null);
+    setMessage("Batch categorization cancelled.");
+  };
+
   return (
     <div className="app-container">
       {/* Full-screen drop overlay */}
@@ -801,6 +907,42 @@ const PDFProcessor = () => {
                 )}
               </button>
             </form>
+
+            {/* Batch Categorize Button - only shown when user is authenticated */}
+            {token && bankFile && !showBatchProgress && (
+              <button
+                type="button"
+                className="btn"
+                style={{ marginTop: '0.75rem', backgroundColor: '#7c3aed' }}
+                onClick={handleBatchCategorize}
+              >
+                <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                </svg>
+                Batch Categorize All Transactions
+              </button>
+            )}
+
+            {/* Batch Progress Bar */}
+            {showBatchProgress && bankStatementId && (
+              <BatchProgressBar
+                bankStatementId={bankStatementId}
+                onComplete={handleBatchComplete}
+                onCancel={handleBatchCancel}
+                confidenceThreshold={70}
+                autoStart={true}
+              />
+            )}
+
+            {/* Export Panel - shows when batch categorization is complete */}
+            {token && bankStatementId && batchCategorizationComplete && (
+              <ExportPanel
+                bankStatementId={bankStatementId}
+                onExportComplete={(result) => {
+                  setMessage(`Successfully exported ${result.filename}`);
+                }}
+              />
+            )}
           </div>
         </div>
 

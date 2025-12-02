@@ -343,14 +343,16 @@ def get_or_create_vendor_research(
 def create_categorization(
     db: Session,
     user_id: int,
-    transaction_id: int,
     categorization_data: Dict,
+    transaction_id: Optional[int] = None,
+    bank_transaction_id: Optional[int] = None,
     vendor_research_id: Optional[int] = None
 ) -> models.Categorization:
-    """Create a new categorization"""
+    """Create a new categorization for either a document transaction or bank transaction"""
     categorization = models.Categorization(
         user_id=user_id,
         transaction_id=transaction_id,
+        bank_transaction_id=bank_transaction_id,
         vendor_research_id=vendor_research_id,
         category=categorization_data.get("category"),
         subcategory=categorization_data.get("subcategory"),
@@ -367,6 +369,60 @@ def create_categorization(
     db.commit()
     db.refresh(categorization)
     return categorization
+
+
+def get_bank_transactions_by_statement(
+    db: Session,
+    user_id: int,
+    bank_statement_id: int
+) -> List[models.BankTransaction]:
+    """Get all bank transactions for a specific statement"""
+    return db.query(models.BankTransaction).filter(
+        and_(
+            models.BankTransaction.user_id == user_id,
+            models.BankTransaction.bank_statement_id == bank_statement_id
+        )
+    ).order_by(models.BankTransaction.transaction_date).all()
+
+
+def get_bank_statement_by_id(
+    db: Session,
+    user_id: int,
+    statement_id: int
+) -> Optional[models.BankStatement]:
+    """Get a bank statement by ID"""
+    return db.query(models.BankStatement).filter(
+        and_(
+            models.BankStatement.id == statement_id,
+            models.BankStatement.user_id == user_id
+        )
+    ).first()
+
+
+def get_categorization_for_bank_transaction(
+    db: Session,
+    user_id: int,
+    bank_transaction_id: int
+) -> Optional[models.Categorization]:
+    """Get the categorization for a specific bank transaction"""
+    return db.query(models.Categorization).filter(
+        and_(
+            models.Categorization.user_id == user_id,
+            models.Categorization.bank_transaction_id == bank_transaction_id
+        )
+    ).first()
+
+
+def update_bank_transaction_category(
+    db: Session,
+    bank_transaction_id: int,
+    category: str
+):
+    """Update the category field on a bank transaction for quick access"""
+    db.query(models.BankTransaction).filter(
+        models.BankTransaction.id == bank_transaction_id
+    ).update({"category": category})
+    db.commit()
 
 
 def update_categorization_approval(

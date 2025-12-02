@@ -196,7 +196,8 @@ class Categorization(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=True, index=True)
+    bank_transaction_id = Column(Integer, ForeignKey("bank_transactions.id", ondelete="CASCADE"), nullable=True, index=True)
     vendor_research_id = Column(Integer, ForeignKey("vendor_research.id", ondelete="SET NULL"))
 
     # Categorization results
@@ -232,6 +233,7 @@ class Categorization(Base):
     # Relationships
     user = relationship("User", back_populates="categorizations")
     transaction = relationship("Transaction", back_populates="categorizations")
+    bank_transaction = relationship("BankTransaction", back_populates="categorizations")
     vendor_research = relationship("VendorResearch", back_populates="categorizations")
 
     # Constraints
@@ -364,6 +366,7 @@ class BankTransaction(Base):
     user = relationship("User", back_populates="bank_transactions")
     bank_statement = relationship("BankStatement", back_populates="bank_transactions")
     reconciliation_matches = relationship("ReconciliationMatch", back_populates="bank_transaction", cascade="all, delete-orphan")
+    categorizations = relationship("Categorization", back_populates="bank_transaction", cascade="all, delete-orphan")
 
     # Indexes for full-text search
     __table_args__ = (

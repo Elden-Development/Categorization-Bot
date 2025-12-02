@@ -1,7 +1,11 @@
 import io
 import asyncio
 import json
-from fastapi import FastAPI, UploadFile, File, Body, Form, Depends, HTTPException, status, Request
+from fastapi import FastAPI, UploadFile, File, Body, Form, Depends, HTTPException, status, Request, Query, BackgroundTasks
+import uuid
+import threading
+from dataclasses import dataclass, field
+from typing import Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -21,6 +25,7 @@ from ml_categorization import get_ml_engine
 from categories import get_all_categories, get_categories_by_parent, get_subcategories_for_category
 from bank_statement_parser import BankStatementParser
 from reconciliation_engine import ReconciliationEngine
+from vendor_mapping import categorize_by_vendor, get_all_known_vendors, normalize_vendor_name
 
 # Database imports
 from sqlalchemy.orm import Session
@@ -112,6 +117,130 @@ def get_user_friendly_error(error: Exception) -> str:
         return "Request timed out. Please try again."
     else:
         return "An error occurred while processing your request. Please try again."
+
+
+# ============================================================================
+# BATCH JOB TRACKING SYSTEM
+# ============================================================================
+
+@dataclass
+class BatchJob:
+    """Represents a batch processing job"""
+    job_id: str
+    user_id: int
+    statement_id: int
+    status: str  # 'pending', 'processing', 'completed', 'failed'
+    total_transactions: int = 0
+    processed_count: int = 0
+    failed_count: int = 0
+    high_confidence_count: int = 0
+    low_confidence_count: int = 0
+    current_transaction: str = ""
+    progress_percent: float = 0.0
+    started_at: datetime = field(default_factory=datetime.now)
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    results: list = field(default_factory=list)
+    category_counts: dict = field(default_factory=dict)
+
+
+class BatchJobTracker:
+    """Thread-safe batch job tracker"""
+
+    def __init__(self):
+        self._jobs: Dict[str, BatchJob] = {}
+        self._lock = threading.Lock()
+        self._max_jobs = 1000  # Max jobs to keep in memory
+
+    def create_job(self, user_id: int, statement_id: int, total_transactions: int) -> str:
+        """Create a new batch job and return job_id"""
+        job_id = str(uuid.uuid4())
+
+        with self._lock:
+            # Clean up old jobs if we have too many
+            if len(self._jobs) >= self._max_jobs:
+                self._cleanup_old_jobs()
+
+            self._jobs[job_id] = BatchJob(
+                job_id=job_id,
+                user_id=user_id,
+                statement_id=statement_id,
+                status="pending",
+                total_transactions=total_transactions
+            )
+
+        return job_id
+
+    def start_job(self, job_id: str):
+        """Mark job as processing"""
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].status = "processing"
+                self._jobs[job_id].started_at = datetime.now()
+
+    def update_progress(self, job_id: str, processed: int, current_description: str = "",
+                       high_conf: int = 0, low_conf: int = 0, failed: int = 0):
+        """Update job progress"""
+        with self._lock:
+            if job_id in self._jobs:
+                job = self._jobs[job_id]
+                job.processed_count = processed
+                job.current_transaction = current_description
+                job.high_confidence_count = high_conf
+                job.low_confidence_count = low_conf
+                job.failed_count = failed
+                if job.total_transactions > 0:
+                    job.progress_percent = round((processed / job.total_transactions) * 100, 1)
+
+    def add_result(self, job_id: str, result: dict):
+        """Add a categorization result to the job"""
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].results.append(result)
+
+    def update_category_count(self, job_id: str, category: str):
+        """Update category distribution"""
+        with self._lock:
+            if job_id in self._jobs:
+                counts = self._jobs[job_id].category_counts
+                counts[category] = counts.get(category, 0) + 1
+
+    def complete_job(self, job_id: str, success: bool = True, error_message: str = None):
+        """Mark job as completed or failed"""
+        with self._lock:
+            if job_id in self._jobs:
+                job = self._jobs[job_id]
+                job.status = "completed" if success else "failed"
+                job.completed_at = datetime.now()
+                job.progress_percent = 100.0 if success else job.progress_percent
+                job.error_message = error_message
+
+    def get_job(self, job_id: str) -> Optional[BatchJob]:
+        """Get job by ID"""
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def get_user_jobs(self, user_id: int, limit: int = 10) -> list:
+        """Get recent jobs for a user"""
+        with self._lock:
+            user_jobs = [j for j in self._jobs.values() if j.user_id == user_id]
+            # Sort by started_at descending
+            user_jobs.sort(key=lambda x: x.started_at, reverse=True)
+            return user_jobs[:limit]
+
+    def _cleanup_old_jobs(self):
+        """Remove oldest completed jobs to free memory"""
+        completed_jobs = [(jid, j) for jid, j in self._jobs.items()
+                         if j.status in ('completed', 'failed')]
+        # Sort by completion time
+        completed_jobs.sort(key=lambda x: x[1].completed_at or x[1].started_at)
+        # Remove oldest half
+        for jid, _ in completed_jobs[:len(completed_jobs)//2]:
+            del self._jobs[jid]
+
+
+# Global batch job tracker instance
+batch_job_tracker = BatchJobTracker()
 
 
 app = FastAPI(title="Categorization Bot API", version="1.0.0")
@@ -1887,20 +2016,27 @@ async def categorize_transaction_smart(
 
                     if db_transaction:
                         # Save categorization with needs_review flag
-                        crud.create_categorization(
+                        categorization_data = {
+                            "category": result["final_categorization"].get("category"),
+                            "subcategory": result["final_categorization"].get("subcategory"),
+                            "ledger_type": result["final_categorization"].get("ledgerType"),
+                            "method": "smart_ai",
+                            "confidence_score": final_confidence,
+                            "explanation": result["final_categorization"].get("explanation"),
+                            "transaction_purpose": transaction_purpose,
+                            "full_result": result
+                        }
+                        db_cat = crud.create_categorization(
                             db=db,
                             user_id=current_user.id,
-                            transaction_id=db_transaction.id,
-                            category=result["final_categorization"].get("category"),
-                            subcategory=result["final_categorization"].get("subcategory"),
-                            ledger_type=result["final_categorization"].get("ledgerType"),
-                            method="smart_ai",
-                            confidence_score=final_confidence,
-                            explanation=result["final_categorization"].get("explanation"),
-                            categorization_data=result,
-                            transaction_purpose=transaction_purpose,
-                            user_approved=not needs_manual_review  # Auto-approve if high confidence
+                            categorization_data=categorization_data,
+                            transaction_id=db_transaction.id
                         )
+                        # Auto-approve if high confidence
+                        if not needs_manual_review:
+                            crud.update_categorization_approval(
+                                db, db_cat.id, current_user.id, approved=True
+                            )
 
                         # Update transaction to flag for review if needed
                         if needs_manual_review:
@@ -2231,19 +2367,25 @@ async def store_categorization(
 
                 if db_transaction:
                     # Save categorization
-                    crud.create_categorization(
+                    categorization_data = {
+                        "category": request.categorization.get("category"),
+                        "subcategory": request.categorization.get("subcategory"),
+                        "ledger_type": request.categorization.get("ledgerType"),
+                        "method": request.selected_method,
+                        "confidence_score": request.categorization.get("confidence", 0),
+                        "explanation": request.categorization.get("explanation"),
+                        "transaction_purpose": request.transaction_purpose,
+                        "full_categorization": request.categorization
+                    }
+                    db_cat = crud.create_categorization(
                         db=db,
                         user_id=current_user.id,
-                        transaction_id=db_transaction.id,
-                        category=request.categorization.get("category"),
-                        subcategory=request.categorization.get("subcategory"),
-                        ledger_type=request.categorization.get("ledgerType"),
-                        method=request.selected_method,
-                        confidence_score=request.categorization.get("confidence", 0),
-                        explanation=request.categorization.get("explanation"),
-                        categorization_data=request.categorization,
-                        transaction_purpose=request.transaction_purpose,
-                        user_approved=True  # Since user selected it
+                        categorization_data=categorization_data,
+                        transaction_id=db_transaction.id
+                    )
+                    # Mark as approved since user selected it
+                    crud.update_categorization_approval(
+                        db, db_cat.id, current_user.id, approved=True
                     )
 
                     # Log activity
@@ -2521,25 +2663,31 @@ async def parse_bank_statement(
         if current_user:
             try:
                 # Create bank statement record
+                statement_data = {
+                    "file_name": file.filename,
+                    "file_type": file_type,
+                    "transactions_data": transactions,
+                    "transaction_count": len(transactions)
+                }
                 db_statement = crud.create_bank_statement(
                     db=db,
                     user_id=current_user.id,
-                    file_name=file.filename,
-                    file_type=file_type,
-                    transactions_data=transactions,
-                    transaction_count=len(transactions)
+                    statement_data=statement_data
                 )
 
                 # Save individual transactions
                 for transaction in transactions:
+                    transaction_data = {
+                        "transaction_date": transaction.get("date"),
+                        "description": transaction.get("description"),
+                        "amount": transaction.get("amount"),
+                        "transaction_type": transaction.get("type")
+                    }
                     crud.create_bank_transaction(
                         db=db,
                         user_id=current_user.id,
                         bank_statement_id=db_statement.id,
-                        transaction_date=transaction.get("date"),
-                        description=transaction.get("description"),
-                        amount=transaction.get("amount"),
-                        transaction_type=transaction.get("type")
+                        transaction_data=transaction_data
                     )
 
                 # Log activity
@@ -2819,6 +2967,133 @@ async def login(
 async def get_current_user_info(current_user: models.User = Depends(get_current_user)):
     """Get current authenticated user information"""
     return current_user
+
+
+# ============================================================================
+# USER SETTINGS ENDPOINTS
+# ============================================================================
+
+class UserSettings(BaseModel):
+    """User preferences and settings"""
+    confidence_threshold: float = Field(
+        default=70.0,
+        ge=0,
+        le=100,
+        description="Minimum confidence score (0-100) to auto-approve categorizations"
+    )
+    auto_approve_vendor_mapping: bool = Field(
+        default=True,
+        description="Automatically approve categorizations from known vendor mapping"
+    )
+    default_export_format: str = Field(
+        default="csv",
+        description="Default export format (csv or excel)"
+    )
+
+    class Config:
+        from_attributes = True
+
+
+class UserSettingsResponse(BaseModel):
+    """Response model for user settings"""
+    settings: UserSettings
+    message: str
+
+
+DEFAULT_USER_SETTINGS = {
+    "confidence_threshold": 70.0,
+    "auto_approve_vendor_mapping": True,
+    "default_export_format": "csv"
+}
+
+
+@app.get("/settings", response_model=UserSettingsResponse, tags=["User Settings"])
+async def get_user_settings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current user's settings/preferences.
+
+    Returns the user's configured settings including:
+    - **confidence_threshold**: Minimum confidence for auto-approval (default: 70%)
+    - **auto_approve_vendor_mapping**: Auto-approve known vendors (default: true)
+    - **default_export_format**: Preferred export format (default: csv)
+    """
+    # Merge user settings with defaults
+    user_settings = current_user.settings or {}
+    merged_settings = {**DEFAULT_USER_SETTINGS, **user_settings}
+
+    return {
+        "settings": merged_settings,
+        "message": "Settings retrieved successfully"
+    }
+
+
+@app.patch("/settings", response_model=UserSettingsResponse, tags=["User Settings"])
+async def update_user_settings(
+    settings: UserSettings,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update current user's settings/preferences.
+
+    Configurable settings:
+    - **confidence_threshold**: Set between 0-100 (higher = stricter auto-approval)
+    - **auto_approve_vendor_mapping**: Enable/disable auto-approval for known vendors
+    - **default_export_format**: Set to 'csv' or 'excel'
+    """
+    # Get existing settings or empty dict
+    existing_settings = current_user.settings or {}
+
+    # Update with new values
+    updated_settings = {
+        **existing_settings,
+        "confidence_threshold": settings.confidence_threshold,
+        "auto_approve_vendor_mapping": settings.auto_approve_vendor_mapping,
+        "default_export_format": settings.default_export_format
+    }
+
+    # Save to database
+    current_user.settings = updated_settings
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "settings": updated_settings,
+        "message": "Settings updated successfully"
+    }
+
+
+@app.patch("/settings/confidence-threshold", response_model=UserSettingsResponse, tags=["User Settings"])
+async def update_confidence_threshold(
+    threshold: float = Query(..., ge=0, le=100, description="New confidence threshold (0-100)"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Quick endpoint to update just the confidence threshold.
+
+    - **threshold**: Value between 0 and 100
+      - 0-50: Very lenient (most categorizations auto-approved)
+      - 50-70: Moderate (good balance)
+      - 70-85: Strict (only high-confidence auto-approved)
+      - 85-100: Very strict (manual review for most)
+    """
+    existing_settings = current_user.settings or {}
+    existing_settings["confidence_threshold"] = threshold
+
+    current_user.settings = existing_settings
+    db.commit()
+    db.refresh(current_user)
+
+    merged_settings = {**DEFAULT_USER_SETTINGS, **existing_settings}
+
+    return {
+        "settings": merged_settings,
+        "message": f"Confidence threshold updated to {threshold}%"
+    }
 
 
 # ============================================================================
@@ -3298,6 +3573,1582 @@ async def approve_categorization(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing approval: {str(e)}"
         )
+
+
+# ============================================================================
+# BULK APPROVE ENDPOINT
+# ============================================================================
+
+class BulkApproveRequest(BaseModel):
+    """Request model for bulk approving categorizations"""
+    transaction_ids: Optional[List[str]] = Field(
+        default=None,
+        description="List of specific transaction IDs to approve"
+    )
+    bank_statement_id: Optional[int] = Field(
+        default=None,
+        description="Approve all transactions for this bank statement"
+    )
+    min_confidence: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Only approve transactions with confidence >= this threshold"
+    )
+    approve_all_high_confidence: bool = Field(
+        default=False,
+        description="Approve all high-confidence transactions (uses user's confidence threshold)"
+    )
+
+
+class BulkApproveResponse(BaseModel):
+    """Response model for bulk approve operation"""
+    success: bool
+    approved_count: int
+    skipped_count: int
+    total_processed: int
+    message: str
+    approved_transactions: List[str] = []
+    skipped_transactions: List[dict] = []
+
+
+@app.post("/review-queue/bulk-approve", tags=["Review"], response_model=BulkApproveResponse)
+async def bulk_approve_categorizations(
+    request: BulkApproveRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk approve multiple categorizations at once.
+
+    **Options:**
+    1. **By transaction IDs**: Provide a list of specific transaction_ids to approve
+    2. **By bank statement**: Provide bank_statement_id to approve all categorized transactions for that statement
+    3. **By confidence threshold**: Add min_confidence to only approve transactions above that confidence
+    4. **High confidence auto-approve**: Set approve_all_high_confidence=true to approve all transactions
+       meeting the user's confidence threshold setting
+
+    **Examples:**
+    - Approve specific transactions: `{"transaction_ids": ["tx1", "tx2", "tx3"]}`
+    - Approve all for a statement: `{"bank_statement_id": 1}`
+    - Approve high-confidence only: `{"bank_statement_id": 1, "min_confidence": 85}`
+    - Auto-approve by user threshold: `{"bank_statement_id": 1, "approve_all_high_confidence": true}`
+
+    **Note:** Already approved transactions will be skipped.
+    """
+    try:
+        # Validate request - need at least one selection criteria
+        if not request.transaction_ids and not request.bank_statement_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must provide either transaction_ids or bank_statement_id"
+            )
+
+        # Get user's confidence threshold if using auto-approve
+        user_threshold = 70.0  # default
+        if request.approve_all_high_confidence:
+            user_settings = crud.get_user_settings(db, current_user.id)
+            if user_settings and user_settings.settings:
+                user_threshold = user_settings.settings.get("confidence_threshold", 70.0)
+
+        # Determine effective confidence threshold
+        effective_threshold = None
+        if request.approve_all_high_confidence:
+            effective_threshold = user_threshold
+        elif request.min_confidence is not None:
+            effective_threshold = request.min_confidence
+
+        approved_count = 0
+        skipped_count = 0
+        approved_transactions = []
+        skipped_transactions = []
+
+        # Build query for categorizations to approve
+        if request.transaction_ids:
+            # Get transactions by IDs
+            transactions = db.query(models.Transaction).filter(
+                models.Transaction.transaction_id.in_(request.transaction_ids),
+                models.Transaction.user_id == current_user.id
+            ).all()
+
+            transaction_id_map = {t.transaction_id: t.id for t in transactions}
+
+            for tx_id in request.transaction_ids:
+                if tx_id not in transaction_id_map:
+                    skipped_transactions.append({
+                        "transaction_id": tx_id,
+                        "reason": "Transaction not found"
+                    })
+                    skipped_count += 1
+                    continue
+
+                # Get categorization
+                categorization = db.query(models.Categorization).filter(
+                    models.Categorization.transaction_id == transaction_id_map[tx_id],
+                    models.Categorization.user_id == current_user.id
+                ).order_by(models.Categorization.created_at.desc()).first()
+
+                if not categorization:
+                    skipped_transactions.append({
+                        "transaction_id": tx_id,
+                        "reason": "No categorization found"
+                    })
+                    skipped_count += 1
+                    continue
+
+                if categorization.user_approved:
+                    skipped_transactions.append({
+                        "transaction_id": tx_id,
+                        "reason": "Already approved"
+                    })
+                    skipped_count += 1
+                    continue
+
+                # Check confidence threshold
+                if effective_threshold is not None:
+                    confidence = float(categorization.confidence_score) if categorization.confidence_score else 0
+                    if confidence < effective_threshold:
+                        skipped_transactions.append({
+                            "transaction_id": tx_id,
+                            "reason": f"Below confidence threshold ({confidence:.1f}% < {effective_threshold}%)"
+                        })
+                        skipped_count += 1
+                        continue
+
+                # Approve the categorization
+                categorization.user_approved = True
+                categorization.user_modified = False
+                approved_transactions.append(tx_id)
+                approved_count += 1
+
+        elif request.bank_statement_id:
+            # Verify bank statement exists and belongs to user
+            statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+            if not statement:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Bank statement not found"
+                )
+
+            # Get all bank transactions for this statement
+            bank_txs = crud.get_bank_transactions_by_statement(db, current_user.id, request.bank_statement_id)
+
+            for bank_tx in bank_txs:
+                tx_id = bank_tx.transaction_id if hasattr(bank_tx, 'transaction_id') else None
+
+                if not tx_id:
+                    skipped_count += 1
+                    continue
+
+                # Get the transaction record
+                transaction = db.query(models.Transaction).filter(
+                    models.Transaction.id == tx_id,
+                    models.Transaction.user_id == current_user.id
+                ).first()
+
+                if not transaction:
+                    skipped_count += 1
+                    continue
+
+                # Get categorization
+                categorization = db.query(models.Categorization).filter(
+                    models.Categorization.transaction_id == transaction.id,
+                    models.Categorization.user_id == current_user.id
+                ).order_by(models.Categorization.created_at.desc()).first()
+
+                if not categorization:
+                    skipped_transactions.append({
+                        "transaction_id": transaction.transaction_id,
+                        "reason": "No categorization found"
+                    })
+                    skipped_count += 1
+                    continue
+
+                if categorization.user_approved:
+                    skipped_transactions.append({
+                        "transaction_id": transaction.transaction_id,
+                        "reason": "Already approved"
+                    })
+                    skipped_count += 1
+                    continue
+
+                # Check confidence threshold
+                if effective_threshold is not None:
+                    confidence = float(categorization.confidence_score) if categorization.confidence_score else 0
+                    if confidence < effective_threshold:
+                        skipped_transactions.append({
+                            "transaction_id": transaction.transaction_id,
+                            "reason": f"Below confidence threshold ({confidence:.1f}% < {effective_threshold}%)"
+                        })
+                        skipped_count += 1
+                        continue
+
+                # Approve the categorization
+                categorization.user_approved = True
+                categorization.user_modified = False
+                approved_transactions.append(transaction.transaction_id)
+                approved_count += 1
+
+        # Commit all approvals
+        db.commit()
+
+        # Log activity
+        crud.log_activity(
+            db=db,
+            user_id=current_user.id,
+            action="bulk_approve",
+            entity_type="categorizations",
+            entity_id=None,
+            details={
+                "approved_count": approved_count,
+                "skipped_count": skipped_count,
+                "bank_statement_id": request.bank_statement_id,
+                "min_confidence": effective_threshold
+            }
+        )
+
+        total_processed = approved_count + skipped_count
+
+        return BulkApproveResponse(
+            success=True,
+            approved_count=approved_count,
+            skipped_count=skipped_count,
+            total_processed=total_processed,
+            message=f"Approved {approved_count} of {total_processed} transactions",
+            approved_transactions=approved_transactions,
+            skipped_transactions=skipped_transactions[:50]  # Limit to first 50 for response size
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in bulk approve: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing bulk approval: {str(e)}"
+        )
+
+
+# ============================================================================
+# BATCH CATEGORIZATION ENDPOINTS
+# ============================================================================
+
+class BatchCategorizationRequest(BaseModel):
+    """Request model for batch categorization of bank statement transactions"""
+    bank_statement_id: int
+    confidence_threshold: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Minimum confidence to auto-approve. If not provided, uses user's saved setting (default: 70%)"
+    )
+    use_vendor_mapping: Optional[bool] = Field(
+        default=None,
+        description="Use vendor mapping for known merchants. If not provided, uses user's saved setting (default: true)"
+    )
+
+
+class BatchCategorizationResponse(BaseModel):
+    """Response model for batch categorization results"""
+    success: bool
+    statement_id: int
+    total_transactions: int
+    processed: int
+    failed: int
+    high_confidence: int
+    low_confidence: int
+    results: List[dict]
+    summary: dict
+
+
+@app.post("/categorize-bank-statement", response_model=BatchCategorizationResponse)
+async def categorize_bank_statement(
+    request: BatchCategorizationRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Batch categorize ALL transactions in a bank statement.
+
+    This endpoint:
+    1. Retrieves all transactions from the specified bank statement
+    2. Categorizes each transaction using the hybrid ML + Gemini approach
+    3. Stores categorizations in the database
+    4. Returns comprehensive results with confidence scores
+
+    Transactions with confidence >= threshold are marked as auto-approved.
+    Low-confidence transactions are flagged for manual review.
+    """
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {request.bank_statement_id} not found"
+        )
+
+    # Get user settings and resolve threshold/options
+    user_settings = current_user.settings or {}
+    confidence_threshold = request.confidence_threshold
+    if confidence_threshold is None:
+        confidence_threshold = user_settings.get("confidence_threshold", DEFAULT_USER_SETTINGS["confidence_threshold"])
+
+    use_vendor_mapping = request.use_vendor_mapping
+    if use_vendor_mapping is None:
+        use_vendor_mapping = user_settings.get("auto_approve_vendor_mapping", DEFAULT_USER_SETTINGS["auto_approve_vendor_mapping"])
+
+    # Get all transactions for this statement
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, request.bank_statement_id
+    )
+
+    if not bank_transactions:
+        return BatchCategorizationResponse(
+            success=True,
+            statement_id=request.bank_statement_id,
+            total_transactions=0,
+            processed=0,
+            failed=0,
+            high_confidence=0,
+            low_confidence=0,
+            results=[],
+            summary={"message": "No transactions found in this statement"}
+        )
+
+    results = []
+    processed = 0
+    failed = 0
+    high_confidence = 0
+    low_confidence = 0
+    category_counts = {}
+
+    # Process each transaction
+    for bank_tx in bank_transactions:
+        try:
+            # Check if already categorized
+            existing_cat = crud.get_categorization_for_bank_transaction(
+                db, current_user.id, bank_tx.id
+            )
+            if existing_cat:
+                # Already categorized, include in results but skip processing
+                results.append({
+                    "bank_transaction_id": bank_tx.id,
+                    "description": bank_tx.description,
+                    "amount": float(bank_tx.amount),
+                    "date": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                    "category": existing_cat.category,
+                    "subcategory": existing_cat.subcategory,
+                    "ledger_type": existing_cat.ledger_type,
+                    "confidence": float(existing_cat.confidence_score) if existing_cat.confidence_score else 0,
+                    "method": existing_cat.method,
+                    "status": "already_categorized",
+                    "user_approved": existing_cat.user_approved
+                })
+                processed += 1
+                if existing_cat.confidence_score and existing_cat.confidence_score >= confidence_threshold:
+                    high_confidence += 1
+                else:
+                    low_confidence += 1
+                category_counts[existing_cat.category] = category_counts.get(existing_cat.category, 0) + 1
+                continue
+
+            # Build document data structure for categorization
+            document_data = {
+                "documentMetadata": {
+                    "source": {"name": bank_tx.description},
+                    "documentType": "bank_transaction",
+                    "documentDate": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                    "documentNumber": f"bank_tx_{bank_tx.id}"
+                },
+                "financialData": {
+                    "totalAmount": float(bank_tx.amount),
+                    "currency": "USD",
+                    "transactionType": bank_tx.transaction_type or ("debit" if bank_tx.amount < 0 else "credit")
+                }
+            }
+
+            # STEP 1: Try vendor mapping first (fast, deterministic) if enabled
+            vendor_result = None
+            if use_vendor_mapping:
+                vendor_result = categorize_by_vendor(bank_tx.description)
+
+            if vendor_result:
+                # Known vendor found - use deterministic categorization
+                category = vendor_result["category"]
+                subcategory = vendor_result["subcategory"]
+                ledger_type = vendor_result["ledger_type"]
+                confidence = vendor_result["confidence"]
+                method = "vendor_mapping"
+                explanation = vendor_result["explanation"]
+                ml_conf = 0
+                gemini_conf = 0
+            else:
+                # STEP 2: Fall back to ML + Gemini for unknown vendors
+                try:
+                    engine = get_ml_categorization_engine()
+
+                    # Run ML prediction and Gemini categorization in parallel
+                    ml_prediction_task = engine.predict_category(
+                        document_data,
+                        "Bank statement transaction"
+                    )
+                    gemini_task = _get_gemini_categorization(
+                        bank_tx.description,
+                        document_data,
+                        "Bank statement transaction"
+                    )
+
+                    ml_prediction, gemini_result = await asyncio.gather(
+                        ml_prediction_task,
+                        gemini_task
+                    )
+
+                    # Determine best result (prefer higher confidence)
+                    ml_conf = ml_prediction.get("confidence", 0) * 100 if ml_prediction.get("hasPrediction") else 0
+                    gemini_conf = gemini_result.get("confidence", 0)
+
+                    if ml_conf > gemini_conf and ml_prediction.get("hasPrediction"):
+                        category = ml_prediction.get("category", "Other Expenses")
+                        subcategory = ml_prediction.get("subcategory", "Miscellaneous")
+                        ledger_type = ml_prediction.get("ledgerType", "Expense (Other)")
+                        confidence = ml_conf
+                        method = "ml"
+                        explanation = f"ML prediction based on {ml_prediction.get('supportingTransactions', 0)} similar transactions"
+                    else:
+                        category = gemini_result.get("category", "Other Expenses")
+                        subcategory = gemini_result.get("subcategory", "Miscellaneous")
+                        ledger_type = gemini_result.get("ledgerType", "Expense (Other)")
+                        confidence = gemini_conf
+                        method = "gemini"
+                        explanation = gemini_result.get("explanation", "AI categorization")
+
+                    # Use hybrid if both have predictions
+                    if ml_prediction.get("hasPrediction") and gemini_conf > 0:
+                        method = "hybrid"
+                        # Average confidence if both agree on category
+                        if ml_prediction.get("category") == gemini_result.get("category"):
+                            confidence = (ml_conf + gemini_conf) / 2
+
+                except ValueError:
+                    # ML engine not available, use Gemini only
+                    gemini_result = await _get_gemini_categorization(
+                        bank_tx.description,
+                        document_data,
+                        "Bank statement transaction"
+                    )
+                    category = gemini_result.get("category", "Other Expenses")
+                    subcategory = gemini_result.get("subcategory", "Miscellaneous")
+                    ledger_type = gemini_result.get("ledgerType", "Expense (Other)")
+                    confidence = gemini_result.get("confidence", 0)
+                    method = "gemini"
+                    explanation = gemini_result.get("explanation", "AI categorization")
+                    ml_conf = 0
+                    gemini_conf = confidence
+
+            # Determine if auto-approved based on confidence threshold
+            auto_approved = confidence >= confidence_threshold
+
+            # Create categorization record
+            categorization_data = {
+                "category": category,
+                "subcategory": subcategory,
+                "ledger_type": ledger_type,
+                "method": method,
+                "confidence_score": confidence,
+                "ml_confidence": ml_conf,
+                "gemini_confidence": gemini_conf,
+                "explanation": explanation,
+                "transaction_purpose": "Bank statement transaction"
+            }
+
+            db_categorization = crud.create_categorization(
+                db=db,
+                user_id=current_user.id,
+                categorization_data=categorization_data,
+                bank_transaction_id=bank_tx.id
+            )
+
+            # Update bank transaction category for quick access
+            crud.update_bank_transaction_category(db, bank_tx.id, category)
+
+            # Mark as approved if high confidence
+            if auto_approved:
+                crud.update_categorization_approval(
+                    db, db_categorization.id, current_user.id, approved=True
+                )
+                high_confidence += 1
+            else:
+                low_confidence += 1
+
+            # Track category distribution
+            category_counts[category] = category_counts.get(category, 0) + 1
+
+            results.append({
+                "bank_transaction_id": bank_tx.id,
+                "description": bank_tx.description,
+                "amount": float(bank_tx.amount),
+                "date": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                "category": category,
+                "subcategory": subcategory,
+                "ledger_type": ledger_type,
+                "confidence": confidence,
+                "method": method,
+                "explanation": explanation,
+                "status": "categorized",
+                "user_approved": auto_approved
+            })
+            processed += 1
+
+        except Exception as e:
+            print(f"Error categorizing transaction {bank_tx.id}: {str(e)}")
+            results.append({
+                "bank_transaction_id": bank_tx.id,
+                "description": bank_tx.description,
+                "amount": float(bank_tx.amount),
+                "date": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                "status": "error",
+                "error": str(e)
+            })
+            failed += 1
+
+    # Log activity
+    crud.log_activity(
+        db=db,
+        user_id=current_user.id,
+        action="batch_categorization",
+        entity_type="bank_statement",
+        entity_id=request.bank_statement_id,
+        details={
+            "total": len(bank_transactions),
+            "processed": processed,
+            "failed": failed,
+            "high_confidence": high_confidence,
+            "low_confidence": low_confidence
+        }
+    )
+
+    return BatchCategorizationResponse(
+        success=True,
+        statement_id=request.bank_statement_id,
+        total_transactions=len(bank_transactions),
+        processed=processed,
+        failed=failed,
+        high_confidence=high_confidence,
+        low_confidence=low_confidence,
+        results=results,
+        summary={
+            "category_distribution": category_counts,
+            "average_confidence": sum(r.get("confidence", 0) for r in results if r.get("status") != "error") / max(processed, 1),
+            "needs_review_count": low_confidence,
+            "auto_approved_count": high_confidence,
+            "settings_applied": {
+                "confidence_threshold": confidence_threshold,
+                "vendor_mapping_enabled": use_vendor_mapping
+            }
+        }
+    )
+
+
+# ============================================================================
+# ASYNC BATCH CATEGORIZATION WITH PROGRESS TRACKING
+# ============================================================================
+
+class AsyncBatchRequest(BaseModel):
+    """Request model for async batch categorization"""
+    bank_statement_id: int
+    confidence_threshold: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="If not provided, uses user's saved setting"
+    )
+    use_vendor_mapping: Optional[bool] = Field(
+        default=None,
+        description="If not provided, uses user's saved setting"
+    )
+
+
+class AsyncBatchResponse(BaseModel):
+    """Response when starting an async batch job"""
+    job_id: str
+    status: str
+    message: str
+    total_transactions: int
+    status_url: str
+
+
+class JobStatusResponse(BaseModel):
+    """Response model for job status"""
+    job_id: str
+    status: str
+    progress_percent: float
+    total_transactions: int
+    processed_count: int
+    failed_count: int
+    high_confidence_count: int
+    low_confidence_count: int
+    current_transaction: str
+    started_at: datetime
+    completed_at: Optional[datetime]
+    error_message: Optional[str]
+    # Only included when completed
+    results: Optional[list] = None
+    summary: Optional[dict] = None
+
+
+def process_batch_categorization_job(
+    job_id: str,
+    user_id: int,
+    statement_id: int,
+    confidence_threshold: float,
+    use_vendor_mapping: bool,
+    bank_transactions: list,
+    db_session_factory
+):
+    """Background task to process batch categorization with progress tracking"""
+    from database import SessionLocal
+
+    # Create a new database session for this background task
+    db = SessionLocal()
+
+    try:
+        batch_job_tracker.start_job(job_id)
+
+        processed = 0
+        failed = 0
+        high_confidence = 0
+        low_confidence = 0
+
+        for bank_tx in bank_transactions:
+            try:
+                # Update progress
+                batch_job_tracker.update_progress(
+                    job_id, processed, bank_tx.description,
+                    high_confidence, low_confidence, failed
+                )
+
+                # Check if already categorized
+                existing_cat = crud.get_categorization_for_bank_transaction(
+                    db, user_id, bank_tx.id
+                )
+
+                if existing_cat:
+                    result = {
+                        "bank_transaction_id": bank_tx.id,
+                        "description": bank_tx.description,
+                        "amount": float(bank_tx.amount),
+                        "date": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                        "category": existing_cat.category,
+                        "subcategory": existing_cat.subcategory,
+                        "ledger_type": existing_cat.ledger_type,
+                        "confidence": float(existing_cat.confidence_score) if existing_cat.confidence_score else 0,
+                        "method": existing_cat.method,
+                        "status": "already_categorized",
+                        "user_approved": existing_cat.user_approved
+                    }
+                    batch_job_tracker.add_result(job_id, result)
+                    processed += 1
+                    if existing_cat.confidence_score and existing_cat.confidence_score >= confidence_threshold:
+                        high_confidence += 1
+                    else:
+                        low_confidence += 1
+                    batch_job_tracker.update_category_count(job_id, existing_cat.category)
+                    continue
+
+                # Build document data structure
+                document_data = {
+                    "documentMetadata": {
+                        "source": {"name": bank_tx.description},
+                        "documentType": "bank_transaction",
+                        "documentDate": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                        "documentNumber": f"bank_tx_{bank_tx.id}"
+                    },
+                    "financialData": {
+                        "totalAmount": float(bank_tx.amount),
+                        "currency": "USD",
+                        "transactionType": bank_tx.transaction_type or ("debit" if bank_tx.amount < 0 else "credit")
+                    }
+                }
+
+                # Try vendor mapping first if enabled
+                vendor_result = None
+                if use_vendor_mapping:
+                    vendor_result = categorize_by_vendor(bank_tx.description)
+
+                if vendor_result:
+                    category = vendor_result["category"]
+                    subcategory = vendor_result["subcategory"]
+                    ledger_type = vendor_result["ledger_type"]
+                    confidence = vendor_result["confidence"]
+                    method = "vendor_mapping"
+                    explanation = vendor_result["explanation"]
+                    ml_conf = 0
+                    gemini_conf = 0
+                else:
+                    # Fall back to ML + Gemini
+                    try:
+                        engine = get_ml_categorization_engine()
+                        # predict_category is async, need to run it with asyncio
+                        ml_prediction = asyncio.run(engine.predict_category(document_data, "Bank statement transaction"))
+
+                        if ml_prediction and ml_prediction.get("confidence", 0) > 50:
+                            category = ml_prediction.get("category", "Operating Expenses")
+                            subcategory = ml_prediction.get("subcategory", "General Operating")
+                            ledger_type = ml_prediction.get("ledger_type", "Expense (Operating)")
+                            confidence = ml_prediction.get("confidence", 50)
+                            method = "hybrid"
+                            explanation = ml_prediction.get("explanation", "ML prediction")
+                            ml_conf = confidence
+                            gemini_conf = 0
+                        else:
+                            # Use Gemini as fallback - also async
+                            gemini_result = asyncio.run(_get_gemini_categorization(
+                                bank_tx.description,
+                                document_data,
+                                "Bank statement transaction"
+                            ))
+                            category = gemini_result.get("category", "Operating Expenses")
+                            subcategory = gemini_result.get("subcategory", "General Operating")
+                            ledger_type = gemini_result.get("ledgerType", "Expense (Operating)")
+                            confidence = gemini_result.get("confidence", 70)
+                            method = "gemini"
+                            explanation = gemini_result.get("explanation", "AI categorization")
+                            ml_conf = 0
+                            gemini_conf = confidence
+                    except Exception as cat_error:
+                        # If categorization fails, use defaults
+                        category = "Operating Expenses"
+                        subcategory = "General Operating"
+                        ledger_type = "Expense (Operating)"
+                        confidence = 50
+                        method = "default"
+                        explanation = f"Default categorization (error: {str(cat_error)[:50]})"
+                        ml_conf = 0
+                        gemini_conf = 0
+
+                # Determine if auto-approved
+                auto_approved = confidence >= confidence_threshold
+
+                # Create categorization record
+                categorization_data = {
+                    "category": category,
+                    "subcategory": subcategory,
+                    "ledger_type": ledger_type,
+                    "method": method,
+                    "confidence_score": confidence,
+                    "ml_confidence": ml_conf,
+                    "gemini_confidence": gemini_conf,
+                    "explanation": explanation,
+                    "transaction_purpose": "Bank statement transaction"
+                }
+
+                db_categorization = crud.create_categorization(
+                    db=db,
+                    user_id=user_id,
+                    categorization_data=categorization_data,
+                    bank_transaction_id=bank_tx.id
+                )
+
+                # Update bank transaction category
+                crud.update_bank_transaction_category(db, bank_tx.id, category)
+
+                result = {
+                    "bank_transaction_id": bank_tx.id,
+                    "description": bank_tx.description,
+                    "amount": float(bank_tx.amount),
+                    "date": str(bank_tx.transaction_date) if bank_tx.transaction_date else None,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "ledger_type": ledger_type,
+                    "confidence": confidence,
+                    "method": method,
+                    "explanation": explanation,
+                    "status": "categorized",
+                    "user_approved": auto_approved
+                }
+
+                batch_job_tracker.add_result(job_id, result)
+                batch_job_tracker.update_category_count(job_id, category)
+
+                processed += 1
+                if confidence >= confidence_threshold:
+                    high_confidence += 1
+                else:
+                    low_confidence += 1
+
+            except Exception as tx_error:
+                failed += 1
+                batch_job_tracker.add_result(job_id, {
+                    "bank_transaction_id": bank_tx.id,
+                    "description": bank_tx.description,
+                    "amount": float(bank_tx.amount),
+                    "status": "error",
+                    "error": str(tx_error)
+                })
+
+        # Update final progress
+        batch_job_tracker.update_progress(
+            job_id, processed, "", high_confidence, low_confidence, failed
+        )
+
+        # Log activity
+        crud.log_activity(
+            db=db,
+            user_id=user_id,
+            action="async_batch_categorization",
+            entity_type="bank_statement",
+            entity_id=statement_id,
+            details={
+                "job_id": job_id,
+                "total": len(bank_transactions),
+                "processed": processed,
+                "failed": failed
+            }
+        )
+
+        # Mark job as completed
+        batch_job_tracker.complete_job(job_id, success=True)
+
+    except Exception as e:
+        batch_job_tracker.complete_job(job_id, success=False, error_message=str(e))
+
+    finally:
+        db.close()
+
+
+@app.post("/categorize-bank-statement/async", response_model=AsyncBatchResponse, tags=["Batch Processing"])
+async def start_async_batch_categorization(
+    request: AsyncBatchRequest,
+    background_tasks: BackgroundTasks,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Start async batch categorization with progress tracking.
+
+    Returns immediately with a job_id that can be used to check progress.
+    Use GET /batch-job/{job_id} to check status and get results.
+
+    This is ideal for large statements where you want to show a progress bar.
+    """
+    # Verify the bank statement exists
+    statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {request.bank_statement_id} not found"
+        )
+
+    # Get transactions
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, request.bank_statement_id
+    )
+
+    if not bank_transactions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No transactions found in this statement"
+        )
+
+    # Resolve settings
+    user_settings = current_user.settings or {}
+    confidence_threshold = request.confidence_threshold
+    if confidence_threshold is None:
+        confidence_threshold = user_settings.get("confidence_threshold", DEFAULT_USER_SETTINGS["confidence_threshold"])
+
+    use_vendor_mapping = request.use_vendor_mapping
+    if use_vendor_mapping is None:
+        use_vendor_mapping = user_settings.get("auto_approve_vendor_mapping", DEFAULT_USER_SETTINGS["auto_approve_vendor_mapping"])
+
+    # Create job
+    job_id = batch_job_tracker.create_job(
+        user_id=current_user.id,
+        statement_id=request.bank_statement_id,
+        total_transactions=len(bank_transactions)
+    )
+
+    # Need to import SessionLocal for the background task
+    from database import SessionLocal
+
+    # Start background task
+    background_tasks.add_task(
+        process_batch_categorization_job,
+        job_id=job_id,
+        user_id=current_user.id,
+        statement_id=request.bank_statement_id,
+        confidence_threshold=confidence_threshold,
+        use_vendor_mapping=use_vendor_mapping,
+        bank_transactions=bank_transactions,
+        db_session_factory=SessionLocal
+    )
+
+    return AsyncBatchResponse(
+        job_id=job_id,
+        status="pending",
+        message=f"Batch categorization started for {len(bank_transactions)} transactions",
+        total_transactions=len(bank_transactions),
+        status_url=f"/batch-job/{job_id}"
+    )
+
+
+@app.get("/batch-job/{job_id}", response_model=JobStatusResponse, tags=["Batch Processing"])
+async def get_batch_job_status(
+    job_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Get the status and progress of a batch categorization job.
+
+    Poll this endpoint to track progress. When status is 'completed',
+    the results and summary will be included in the response.
+    """
+    job = batch_job_tracker.get_job(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found"
+        )
+
+    # Verify job belongs to user
+    if job.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this job"
+        )
+
+    response = JobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress_percent=job.progress_percent,
+        total_transactions=job.total_transactions,
+        processed_count=job.processed_count,
+        failed_count=job.failed_count,
+        high_confidence_count=job.high_confidence_count,
+        low_confidence_count=job.low_confidence_count,
+        current_transaction=job.current_transaction,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        error_message=job.error_message
+    )
+
+    # Include results and summary only when completed
+    if job.status == "completed":
+        response.results = job.results
+        response.summary = {
+            "category_distribution": job.category_counts,
+            "average_confidence": sum(r.get("confidence", 0) for r in job.results if r.get("status") != "error") / max(job.processed_count, 1),
+            "needs_review_count": job.low_confidence_count,
+            "auto_approved_count": job.high_confidence_count
+        }
+
+    return response
+
+
+@app.get("/batch-jobs", tags=["Batch Processing"])
+async def list_batch_jobs(
+    limit: int = Query(default=10, ge=1, le=50),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    List recent batch jobs for the current user.
+
+    Returns job status summaries (not full results).
+    """
+    jobs = batch_job_tracker.get_user_jobs(current_user.id, limit)
+
+    return {
+        "jobs": [
+            {
+                "job_id": j.job_id,
+                "statement_id": j.statement_id,
+                "status": j.status,
+                "progress_percent": j.progress_percent,
+                "total_transactions": j.total_transactions,
+                "processed_count": j.processed_count,
+                "started_at": j.started_at,
+                "completed_at": j.completed_at
+            }
+            for j in jobs
+        ],
+        "count": len(jobs)
+    }
+
+
+# ============================================================================
+# EXPORT ENDPOINTS
+# ============================================================================
+
+class ExportFilter(str, Enum):
+    """Filter options for export endpoints"""
+    all = "all"
+    approved = "approved"
+    needs_review = "needs_review"
+    uncategorized = "uncategorized"
+    high_confidence = "high_confidence"
+    low_confidence = "low_confidence"
+
+
+@app.get("/export-statement/{statement_id}", tags=["Export"])
+async def export_statement_csv(
+    statement_id: int,
+    filter: ExportFilter = Query(default=ExportFilter.all, description="Filter transactions"),
+    confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold for high/low filter"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Export categorized bank statement transactions to CSV format.
+
+    **Filter options:**
+    - `all`: Export all transactions
+    - `approved`: Only export approved transactions
+    - `needs_review`: Only export transactions needing review (low confidence or not approved)
+    - `uncategorized`: Only export uncategorized transactions
+    - `high_confidence`: Only export high confidence transactions (>= threshold)
+    - `low_confidence`: Only export low confidence transactions (< threshold)
+
+    Returns a CSV file with columns:
+    - Date, Description, Amount, Type, Category, Subcategory, Ledger Type, Confidence, Method, Approved
+    """
+    from fastapi.responses import StreamingResponse
+    import csv
+
+    # Get user's confidence threshold if not provided
+    if confidence_threshold is None:
+        user_settings = current_user.settings or {}
+        confidence_threshold = user_settings.get("confidence_threshold", 70.0)
+
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {statement_id} not found"
+        )
+
+    # Get all transactions with their categorizations
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, statement_id
+    )
+
+    # Build list of (transaction, categorization) tuples with filtering
+    filtered_transactions = []
+    for tx in bank_transactions:
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, tx.id
+        )
+
+        # Apply filter
+        include = False
+        if filter == ExportFilter.all:
+            include = True
+        elif filter == ExportFilter.approved:
+            include = categorization and categorization.user_approved
+        elif filter == ExportFilter.needs_review:
+            include = not categorization or not categorization.user_approved or (
+                categorization.confidence_score and categorization.confidence_score < confidence_threshold
+            )
+        elif filter == ExportFilter.uncategorized:
+            include = not categorization
+        elif filter == ExportFilter.high_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score >= confidence_threshold
+        elif filter == ExportFilter.low_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score < confidence_threshold
+
+        if include:
+            filtered_transactions.append((tx, categorization))
+
+    # Build CSV data
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Write header
+    writer.writerow([
+        "Date",
+        "Description",
+        "Amount",
+        "Type",
+        "Category",
+        "Subcategory",
+        "Ledger Type",
+        "Confidence",
+        "Method",
+        "Approved"
+    ])
+
+    # Write data rows
+    for tx, categorization in filtered_transactions:
+        tx_type = tx.transaction_type or ("debit" if tx.amount and tx.amount < 0 else "credit")
+
+        writer.writerow([
+            str(tx.transaction_date) if tx.transaction_date else "",
+            tx.description or "",
+            float(tx.amount) if tx.amount else 0,
+            tx_type,
+            categorization.category if categorization else "",
+            categorization.subcategory if categorization else "",
+            categorization.ledger_type if categorization else "",
+            float(categorization.confidence_score) if categorization and categorization.confidence_score else "",
+            categorization.method if categorization else "",
+            "Yes" if categorization and categorization.user_approved else "No"
+        ])
+
+    # Prepare response
+    output.seek(0)
+
+    # Generate filename with filter info
+    filter_suffix = f"_{filter.value}" if filter != ExportFilter.all else ""
+    filename = f"categorized_statement_{statement_id}{filter_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    # Log activity
+    crud.log_activity(
+        db=db,
+        user_id=current_user.id,
+        action="export_csv",
+        entity_type="bank_statement",
+        entity_id=statement_id,
+        details={
+            "transaction_count": len(filtered_transactions),
+            "total_transactions": len(bank_transactions),
+            "filter": filter.value
+        }
+    )
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.get("/export-statement/{statement_id}/excel", tags=["Export"])
+async def export_statement_excel(
+    statement_id: int,
+    filter: ExportFilter = Query(default=ExportFilter.all, description="Filter transactions"),
+    confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold for high/low filter"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Export categorized bank statement transactions to Excel format.
+
+    **Filter options:**
+    - `all`: Export all transactions
+    - `approved`: Only export approved transactions
+    - `needs_review`: Only export transactions needing review
+    - `uncategorized`: Only export uncategorized transactions
+    - `high_confidence`: Only export high confidence transactions
+    - `low_confidence`: Only export low confidence transactions
+
+    Returns an Excel file with:
+    - Summary sheet with statistics
+    - Detail sheet with filtered transactions and categorizations
+    """
+    from fastapi.responses import StreamingResponse
+
+    # Get user's confidence threshold if not provided
+    if confidence_threshold is None:
+        user_settings = current_user.settings or {}
+        confidence_threshold = user_settings.get("confidence_threshold", 70.0)
+
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {statement_id} not found"
+        )
+
+    # Get all transactions with their categorizations
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, statement_id
+    )
+
+    # Build list of (transaction, categorization) tuples with filtering
+    filtered_transactions = []
+    for tx in bank_transactions:
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, tx.id
+        )
+
+        # Apply filter
+        include = False
+        if filter == ExportFilter.all:
+            include = True
+        elif filter == ExportFilter.approved:
+            include = categorization and categorization.user_approved
+        elif filter == ExportFilter.needs_review:
+            include = not categorization or not categorization.user_approved or (
+                categorization.confidence_score and categorization.confidence_score < confidence_threshold
+            )
+        elif filter == ExportFilter.uncategorized:
+            include = not categorization
+        elif filter == ExportFilter.high_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score >= confidence_threshold
+        elif filter == ExportFilter.low_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score < confidence_threshold
+
+        if include:
+            filtered_transactions.append((tx, categorization))
+
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        # Create workbook
+        wb = openpyxl.Workbook()
+
+        # Summary sheet
+        summary_sheet = wb.active
+        summary_sheet.title = "Summary"
+
+        # Calculate statistics from filtered transactions
+        total_transactions = len(bank_transactions)
+        filtered_count = len(filtered_transactions)
+        categorized_count = 0
+        approved_count = 0
+        total_amount = 0
+        category_totals = {}
+
+        for tx, categorization in filtered_transactions:
+            total_amount += float(tx.amount) if tx.amount else 0
+            if categorization:
+                categorized_count += 1
+                if categorization.user_approved:
+                    approved_count += 1
+                cat = categorization.category
+                if cat not in category_totals:
+                    category_totals[cat] = {"count": 0, "amount": 0}
+                category_totals[cat]["count"] += 1
+                category_totals[cat]["amount"] += float(tx.amount) if tx.amount else 0
+
+        # Write summary
+        summary_sheet["A1"] = "Bank Statement Export Summary"
+        summary_sheet["A1"].font = Font(bold=True, size=14)
+
+        filter_display = filter.value.replace("_", " ").title()
+        summary_data = [
+            ("Statement ID", statement_id),
+            ("File Name", statement.file_name),
+            ("Export Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Filter Applied", filter_display),
+            ("", ""),
+            ("Total in Statement", total_transactions),
+            ("Exported Transactions", filtered_count),
+            ("Categorized", categorized_count),
+            ("Approved", approved_count),
+            ("Total Amount", f"${total_amount:,.2f}"),
+            ("", ""),
+            ("Category Breakdown", ""),
+        ]
+
+        row = 3
+        for label, value in summary_data:
+            summary_sheet[f"A{row}"] = label
+            summary_sheet[f"B{row}"] = value
+            if label:
+                summary_sheet[f"A{row}"].font = Font(bold=True)
+            row += 1
+
+        # Category breakdown
+        for cat, data in sorted(category_totals.items()):
+            summary_sheet[f"A{row}"] = f"  {cat}"
+            summary_sheet[f"B{row}"] = f"{data['count']} transactions (${data['amount']:,.2f})"
+            row += 1
+
+        # Detail sheet
+        detail_sheet = wb.create_sheet("Transactions")
+
+        # Headers
+        headers = [
+            "Date", "Description", "Amount", "Type",
+            "Category", "Subcategory", "Ledger Type",
+            "Confidence", "Method", "Approved"
+        ]
+
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        for col, header in enumerate(headers, 1):
+            cell = detail_sheet.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Data rows - use filtered transactions
+        for row_num, (tx, categorization) in enumerate(filtered_transactions, 2):
+
+            tx_type = tx.transaction_type or ("debit" if tx.amount and tx.amount < 0 else "credit")
+
+            detail_sheet.cell(row=row_num, column=1, value=str(tx.transaction_date) if tx.transaction_date else "")
+            detail_sheet.cell(row=row_num, column=2, value=tx.description or "")
+            detail_sheet.cell(row=row_num, column=3, value=float(tx.amount) if tx.amount else 0)
+            detail_sheet.cell(row=row_num, column=4, value=tx_type)
+            detail_sheet.cell(row=row_num, column=5, value=categorization.category if categorization else "")
+            detail_sheet.cell(row=row_num, column=6, value=categorization.subcategory if categorization else "")
+            detail_sheet.cell(row=row_num, column=7, value=categorization.ledger_type if categorization else "")
+            detail_sheet.cell(row=row_num, column=8, value=float(categorization.confidence_score) if categorization and categorization.confidence_score else "")
+            detail_sheet.cell(row=row_num, column=9, value=categorization.method if categorization else "")
+            detail_sheet.cell(row=row_num, column=10, value="Yes" if categorization and categorization.user_approved else "No")
+
+        # Adjust column widths
+        for col in range(1, len(headers) + 1):
+            detail_sheet.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 15
+        detail_sheet.column_dimensions["B"].width = 40  # Description column wider
+
+        # Save to bytes
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # Generate filename with filter info
+        filter_suffix = f"_{filter.value}" if filter != ExportFilter.all else ""
+        filename = f"categorized_statement_{statement_id}{filter_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        # Log activity
+        crud.log_activity(
+            db=db,
+            user_id=current_user.id,
+            action="export_excel",
+            entity_type="bank_statement",
+            entity_id=statement_id,
+            details={
+                "transaction_count": len(filtered_transactions),
+                "total_transactions": len(bank_transactions),
+                "filter": filter.value
+            }
+        )
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except ImportError:
+        # openpyxl not installed, return error with instructions
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Excel export requires openpyxl library. Install with: pip install openpyxl"
+        )
+
+
+@app.get("/export-statement/{statement_id}/quickbooks", tags=["Export"])
+async def export_statement_quickbooks(
+    statement_id: int,
+    filter: ExportFilter = Query(default=ExportFilter.approved, description="Filter transactions (default: approved only)"),
+    confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Export categorized bank statement in QuickBooks-compatible CSV format.
+
+    **Format:** CSV compatible with QuickBooks Online bank transaction import.
+
+    **Columns:**
+    - Date (MM/DD/YYYY format)
+    - Description
+    - Amount (positive for deposits, negative for withdrawals)
+    - Category (mapped to QuickBooks account name)
+
+    **Note:** By default, only exports approved transactions to ensure data quality.
+    """
+    from fastapi.responses import StreamingResponse
+    import csv
+
+    # Get user's confidence threshold if not provided
+    if confidence_threshold is None:
+        user_settings = current_user.settings or {}
+        confidence_threshold = user_settings.get("confidence_threshold", 70.0)
+
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {statement_id} not found"
+        )
+
+    # Get all transactions
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, statement_id
+    )
+
+    # Build filtered list
+    filtered_transactions = []
+    for tx in bank_transactions:
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, tx.id
+        )
+
+        # Apply filter
+        include = False
+        if filter == ExportFilter.all:
+            include = True
+        elif filter == ExportFilter.approved:
+            include = categorization and categorization.user_approved
+        elif filter == ExportFilter.needs_review:
+            include = not categorization or not categorization.user_approved or (
+                categorization.confidence_score and categorization.confidence_score < confidence_threshold
+            )
+        elif filter == ExportFilter.uncategorized:
+            include = not categorization
+        elif filter == ExportFilter.high_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score >= confidence_threshold
+        elif filter == ExportFilter.low_confidence:
+            include = categorization and categorization.confidence_score and categorization.confidence_score < confidence_threshold
+
+        if include:
+            filtered_transactions.append((tx, categorization))
+
+    # Build QuickBooks-compatible CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # QuickBooks CSV header
+    writer.writerow(["Date", "Description", "Amount", "Category"])
+
+    # Write data rows in QuickBooks format
+    for tx, categorization in filtered_transactions:
+        # Format date as MM/DD/YYYY for QuickBooks
+        date_str = ""
+        if tx.transaction_date:
+            try:
+                if isinstance(tx.transaction_date, str):
+                    # Parse and reformat
+                    from datetime import datetime as dt
+                    parsed = dt.strptime(str(tx.transaction_date)[:10], "%Y-%m-%d")
+                    date_str = parsed.strftime("%m/%d/%Y")
+                else:
+                    date_str = tx.transaction_date.strftime("%m/%d/%Y")
+            except:
+                date_str = str(tx.transaction_date)
+
+        # Build category path for QuickBooks (Category:Subcategory format)
+        category_str = ""
+        if categorization:
+            if categorization.category and categorization.subcategory:
+                category_str = f"{categorization.category}:{categorization.subcategory}"
+            elif categorization.category:
+                category_str = categorization.category
+
+        writer.writerow([
+            date_str,
+            tx.description or "",
+            float(tx.amount) if tx.amount else 0,
+            category_str
+        ])
+
+    output.seek(0)
+
+    # Generate filename
+    filter_suffix = f"_{filter.value}" if filter != ExportFilter.approved else ""
+    filename = f"quickbooks_import_{statement_id}{filter_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    # Log activity
+    crud.log_activity(
+        db=db,
+        user_id=current_user.id,
+        action="export_quickbooks",
+        entity_type="bank_statement",
+        entity_id=statement_id,
+        details={
+            "transaction_count": len(filtered_transactions),
+            "total_transactions": len(bank_transactions),
+            "filter": filter.value
+        }
+    )
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.get("/bank-statement/{statement_id}/status")
+async def get_statement_categorization_status(
+    statement_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the categorization status for a bank statement.
+
+    Returns statistics about how many transactions are categorized,
+    approved, and need review.
+    """
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {statement_id} not found"
+        )
+
+    # Get all transactions
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, statement_id
+    )
+
+    total = len(bank_transactions)
+    categorized = 0
+    approved = 0
+    needs_review = 0
+    uncategorized = 0
+
+    for tx in bank_transactions:
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, tx.id
+        )
+        if categorization:
+            categorized += 1
+            if categorization.user_approved:
+                approved += 1
+            else:
+                needs_review += 1
+        else:
+            uncategorized += 1
+
+    return {
+        "statement_id": statement_id,
+        "file_name": statement.file_name,
+        "total_transactions": total,
+        "categorized": categorized,
+        "approved": approved,
+        "needs_review": needs_review,
+        "uncategorized": uncategorized,
+        "completion_percentage": (categorized / total * 100) if total > 0 else 0
+    }
+
+
+@app.get("/known-vendors")
+async def list_known_vendors():
+    """
+    List all known vendor mappings used for deterministic categorization.
+
+    These vendors are categorized instantly without AI calls,
+    providing faster and more consistent results.
+    """
+    vendors = get_all_known_vendors()
+
+    # Group by category for better organization
+    by_category = {}
+    for pattern, mapping in vendors.items():
+        cat = mapping["category"]
+        if cat not in by_category:
+            by_category[cat] = []
+        by_category[cat].append({
+            "pattern": pattern,
+            "subcategory": mapping["subcategory"],
+            "ledger_type": mapping["ledger_type"]
+        })
+
+    return {
+        "total_vendors": len(vendors),
+        "vendors": vendors,
+        "by_category": by_category
+    }
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ fuzzywuzzy>=0.18.0
 python-Levenshtein>=0.25.0
 pandas>=2.2.0
 
+# Excel Export
+openpyxl>=3.1.0
+
 # Database - PostgreSQL with SQLAlchemy ORM
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9  # PostgreSQL adapter
