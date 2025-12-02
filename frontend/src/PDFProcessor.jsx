@@ -12,7 +12,7 @@ const PDFProcessor = () => {
   // Auth context - always call the hook unconditionally
   const authContext = useAuth();
   const token = authContext?.token || null;
-  const user = authContext?.user || null;
+  // Note: user available via authContext?.user if needed
 
   // Batch processing state
   const [documents, setDocuments] = useState([]);
