@@ -257,6 +257,16 @@ app = FastAPI(title="Categorization Bot API", version="1.0.0")
 cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001")
 cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
 
+# Add Railway domains automatically
+cors_origins.extend([
+    "https://frontend-production-e172.up.railway.app",
+    "https://backend-production-3336.up.railway.app",
+])
+# Remove duplicates
+cors_origins = list(set(cors_origins))
+
+print(f"[CORS] Allowed origins: {cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
