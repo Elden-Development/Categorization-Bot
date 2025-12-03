@@ -4847,6 +4847,8 @@ def process_batch_categorization_job(
                     low_confidence += 1
 
             except Exception as tx_error:
+                # Rollback the failed transaction to allow subsequent operations
+                db.rollback()
                 failed += 1
                 batch_job_tracker.add_result(job_id, {
                     "bank_transaction_id": bank_tx.id,
@@ -4861,20 +4863,27 @@ def process_batch_categorization_job(
             job_id, processed, "", high_confidence, low_confidence, failed
         )
 
-        # Log activity
-        crud.log_activity(
-            db=db,
-            user_id=user_id,
-            action="async_batch_categorization",
-            entity_type="bank_statement",
-            entity_id=statement_id,
-            details={
-                "job_id": job_id,
-                "total": len(bank_transactions),
-                "processed": processed,
-                "failed": failed
-            }
-        )
+        # Log activity - use try-except to handle any remaining transaction issues
+        try:
+            # Ensure we have a clean transaction state
+            db.rollback()
+            crud.log_activity(
+                db=db,
+                user_id=user_id,
+                action="async_batch_categorization",
+                entity_type="bank_statement",
+                entity_id=statement_id,
+                details={
+                    "job_id": job_id,
+                    "total": len(bank_transactions),
+                    "processed": processed,
+                    "failed": failed
+                }
+            )
+            db.commit()
+        except Exception as log_error:
+            print(f"Error logging activity: {log_error}")
+            db.rollback()
 
         # Mark job as completed
         batch_job_tracker.complete_job(job_id, success=True)
