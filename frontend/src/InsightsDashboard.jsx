@@ -69,6 +69,7 @@ const InsightsDashboard = () => {
   const getMethodLabel = (method) => {
     switch (method) {
       case 'ml': return 'Machine Learning';
+      case 'vendor_mapping': return 'ML (Vendor Mapping)';
       case 'gemini': return 'Gemini AI';
       case 'hybrid': return 'Hybrid';
       case 'manual': return 'Manual';
