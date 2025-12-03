@@ -4592,6 +4592,8 @@ async def export_statement_csv(
     statement_id: int,
     filter: ExportFilter = Query(default=ExportFilter.all, description="Filter transactions"),
     confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold for high/low filter"),
+    date_start: Optional[date] = Query(default=None, description="Filter transactions from this date (YYYY-MM-DD)"),
+    date_end: Optional[date] = Query(default=None, description="Filter transactions until this date (YYYY-MM-DD)"),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -4605,6 +4607,10 @@ async def export_statement_csv(
     - `uncategorized`: Only export uncategorized transactions
     - `high_confidence`: Only export high confidence transactions (>= threshold)
     - `low_confidence`: Only export low confidence transactions (< threshold)
+
+    **Date range filtering:**
+    - `date_start`: Only include transactions on or after this date
+    - `date_end`: Only include transactions on or before this date
 
     Returns a CSV file with columns:
     - Date, Description, Amount, Type, Category, Subcategory, Ledger Type, Confidence, Method, Approved
@@ -4629,6 +4635,25 @@ async def export_statement_csv(
     bank_transactions = crud.get_bank_transactions_by_statement(
         db, current_user.id, statement_id
     )
+
+    # Apply date range filter if provided
+    if date_start or date_end:
+        date_filtered = []
+        for tx in bank_transactions:
+            tx_date = tx.transaction_date
+            if tx_date:
+                # Convert to date if it's datetime
+                if hasattr(tx_date, 'date'):
+                    tx_date = tx_date.date()
+                elif isinstance(tx_date, str):
+                    tx_date = datetime.strptime(tx_date[:10], "%Y-%m-%d").date()
+
+                if date_start and tx_date < date_start:
+                    continue
+                if date_end and tx_date > date_end:
+                    continue
+            date_filtered.append(tx)
+        bank_transactions = date_filtered
 
     # Build list of (transaction, categorization) tuples with filtering
     filtered_transactions = []
@@ -4725,6 +4750,8 @@ async def export_statement_excel(
     statement_id: int,
     filter: ExportFilter = Query(default=ExportFilter.all, description="Filter transactions"),
     confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold for high/low filter"),
+    date_start: Optional[date] = Query(default=None, description="Filter transactions from this date (YYYY-MM-DD)"),
+    date_end: Optional[date] = Query(default=None, description="Filter transactions until this date (YYYY-MM-DD)"),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -4738,6 +4765,10 @@ async def export_statement_excel(
     - `uncategorized`: Only export uncategorized transactions
     - `high_confidence`: Only export high confidence transactions
     - `low_confidence`: Only export low confidence transactions
+
+    **Date range filtering:**
+    - `date_start`: Only include transactions on or after this date
+    - `date_end`: Only include transactions on or before this date
 
     Returns an Excel file with:
     - Summary sheet with statistics
@@ -4762,6 +4793,25 @@ async def export_statement_excel(
     bank_transactions = crud.get_bank_transactions_by_statement(
         db, current_user.id, statement_id
     )
+
+    # Apply date range filter if provided
+    if date_start or date_end:
+        date_filtered = []
+        for tx in bank_transactions:
+            tx_date = tx.transaction_date
+            if tx_date:
+                # Convert to date if it's datetime
+                if hasattr(tx_date, 'date'):
+                    tx_date = tx_date.date()
+                elif isinstance(tx_date, str):
+                    tx_date = datetime.strptime(tx_date[:10], "%Y-%m-%d").date()
+
+                if date_start and tx_date < date_start:
+                    continue
+                if date_end and tx_date > date_end:
+                    continue
+            date_filtered.append(tx)
+        bank_transactions = date_filtered
 
     # Build list of (transaction, categorization) tuples with filtering
     filtered_transactions = []
@@ -4937,6 +4987,8 @@ async def export_statement_quickbooks(
     statement_id: int,
     filter: ExportFilter = Query(default=ExportFilter.approved, description="Filter transactions (default: approved only)"),
     confidence_threshold: Optional[float] = Query(default=None, description="Confidence threshold"),
+    date_start: Optional[date] = Query(default=None, description="Filter transactions from this date (YYYY-MM-DD)"),
+    date_end: Optional[date] = Query(default=None, description="Filter transactions until this date (YYYY-MM-DD)"),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -4950,6 +5002,10 @@ async def export_statement_quickbooks(
     - Description
     - Amount (positive for deposits, negative for withdrawals)
     - Category (mapped to QuickBooks account name)
+
+    **Date range filtering:**
+    - `date_start`: Only include transactions on or after this date
+    - `date_end`: Only include transactions on or before this date
 
     **Note:** By default, only exports approved transactions to ensure data quality.
     """
@@ -4973,6 +5029,25 @@ async def export_statement_quickbooks(
     bank_transactions = crud.get_bank_transactions_by_statement(
         db, current_user.id, statement_id
     )
+
+    # Apply date range filter if provided
+    if date_start or date_end:
+        date_filtered = []
+        for tx in bank_transactions:
+            tx_date = tx.transaction_date
+            if tx_date:
+                # Convert to date if it's datetime
+                if hasattr(tx_date, 'date'):
+                    tx_date = tx_date.date()
+                elif isinstance(tx_date, str):
+                    tx_date = datetime.strptime(tx_date[:10], "%Y-%m-%d").date()
+
+                if date_start and tx_date < date_start:
+                    continue
+                if date_end and tx_date > date_end:
+                    continue
+            date_filtered.append(tx)
+        bank_transactions = date_filtered
 
     # Build filtered list
     filtered_transactions = []
