@@ -273,8 +273,32 @@ const VendorResearch = ({ vendorName, jsonData }) => {
   const renderMLPrediction = (mlPrediction) => {
     if (!mlPrediction || !mlPrediction.hasPrediction) {
       return (
-        <div className="ml-not-available">
-          <p>{mlPrediction?.reason || "No ML prediction available"}</p>
+        <div style={{
+          padding: "1.5rem",
+          backgroundColor: "#1e293b",
+          borderRadius: "0.75rem",
+          border: "2px solid #334155",
+          minHeight: "300px",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center"
+        }}>
+          <div style={{
+            width: "48px",
+            height: "48px",
+            borderRadius: "50%",
+            backgroundColor: "#334155",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            marginBottom: "1rem"
+          }}>
+            <span style={{ fontSize: "1.5rem" }}>🤖</span>
+          </div>
+          <p style={{ color: "#94a3b8", textAlign: "center" }}>
+            {mlPrediction?.reason || "No ML prediction available"}
+          </p>
         </div>
       );
     }
@@ -284,23 +308,36 @@ const VendorResearch = ({ vendorName, jsonData }) => {
 
     return (
       <div
-        className={`categorization-option ${isSelected ? "selected" : ""}`}
         onClick={() => setSelectedMethod("ml")}
         style={{
           cursor: "pointer",
-          border: isSelected ? "3px solid #4f46e5" : "2px solid #e5e7eb",
-          borderRadius: "0.5rem",
+          border: isSelected ? "3px solid #3b82f6" : "2px solid #334155",
+          borderRadius: "0.75rem",
           padding: "1.5rem",
-          backgroundColor: isSelected ? "#f0f9ff" : "white",
-          transition: "all 0.2s"
+          backgroundColor: isSelected ? "#1e3a5f" : "#1e293b",
+          transition: "all 0.2s",
+          display: "flex",
+          flexDirection: "column",
+          height: "100%"
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <h4 style={{ margin: 0, color: "#1f2937" }}>
-            {isSelected && "✓ "} ML Prediction
-          </h4>
+        {/* Header */}
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "1.25rem",
+          paddingBottom: "1rem",
+          borderBottom: "1px solid #334155"
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            {isSelected && <span style={{ color: "#3b82f6", fontSize: "1.25rem" }}>✓</span>}
+            <h4 style={{ margin: 0, color: "#f1f5f9", fontSize: "1.125rem", fontWeight: "600" }}>
+              ML Prediction
+            </h4>
+          </div>
           <div style={{
-            padding: "0.25rem 0.75rem",
+            padding: "0.375rem 1rem",
             borderRadius: "9999px",
             backgroundColor: getConfidenceColor(mlPrediction.confidence),
             color: "white",
@@ -311,55 +348,91 @@ const VendorResearch = ({ vendorName, jsonData }) => {
           </div>
         </div>
 
-        <div className="categorization-header">
-          <span className="category-name">
-            {mlPrediction.category || "Uncategorized"} - {mlPrediction.subcategory || "N/A"}
-          </span>
-          <span className="category-tag" data-type={mlPrediction.ledgerType || "Unknown"}>
-            {mlPrediction.ledgerType || "Unknown"}
-          </span>
+        {/* Category Result */}
+        <div style={{
+          backgroundColor: "#0f172a",
+          padding: "1rem",
+          borderRadius: "0.5rem",
+          marginBottom: "1.25rem"
+        }}>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "0.5rem"
+          }}>
+            <span style={{ color: "#e2e8f0", fontSize: "1rem", fontWeight: "500" }}>
+              {mlPrediction.category || "Uncategorized"} / {mlPrediction.subcategory || "N/A"}
+            </span>
+            <span style={{
+              padding: "0.25rem 0.75rem",
+              borderRadius: "0.25rem",
+              backgroundColor: "#0d9488",
+              color: "white",
+              fontSize: "0.75rem",
+              fontWeight: "600",
+              textTransform: "uppercase"
+            }}>
+              {mlPrediction.ledgerType || "Unknown"}
+            </span>
+          </div>
         </div>
 
-        <div style={{ marginTop: "1rem" }}>
-          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
-            <strong>Confidence Level:</strong> {mlPrediction.confidenceLevel}
-          </p>
-          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
+        {/* Details */}
+        <div style={{ flex: 1 }}>
+          <div style={{ marginBottom: "0.75rem" }}>
+            <span style={{ color: "#f59e0b", fontWeight: "600", fontSize: "0.875rem" }}>
+              Confidence Level:
+            </span>
+            <span style={{ color: "#94a3b8", fontSize: "0.875rem", marginLeft: "0.5rem" }}>
+              {mlPrediction.confidenceLevel}
+            </span>
+          </div>
+          <p style={{ fontSize: "0.875rem", color: "#94a3b8", marginBottom: "0.75rem", lineHeight: "1.5" }}>
             {mlPrediction.recommendation}
           </p>
-          <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
-            <strong>Based on:</strong> {mlPrediction.supportingTransactions} similar transactions
-          </p>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            color: "#64748b",
+            fontSize: "0.875rem"
+          }}>
+            <span>📊</span>
+            <span><strong style={{ color: "#94a3b8" }}>Based on:</strong> {mlPrediction.supportingTransactions} similar transactions</span>
+          </div>
         </div>
 
+        {/* Similar Transactions */}
         {mlPrediction.examples && mlPrediction.examples.length > 0 && (
-          <details style={{ marginTop: "1rem" }}>
-            <summary style={{ cursor: "pointer", fontWeight: "600", color: "#4f46e5" }}>
-              View Similar Transactions
+          <details style={{ marginTop: "1rem", borderTop: "1px solid #334155", paddingTop: "1rem" }}>
+            <summary style={{
+              cursor: "pointer",
+              fontWeight: "600",
+              color: "#3b82f6",
+              fontSize: "0.875rem",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem"
+            }}>
+              <span>▶</span> View Similar Transactions ({mlPrediction.examples.length})
             </summary>
-            <div style={{ marginTop: "0.5rem" }}>
+            <div style={{ marginTop: "0.75rem", maxHeight: "200px", overflowY: "auto" }}>
               {mlPrediction.examples.map((example, idx) => (
                 <div key={idx} style={{
-                  padding: "0.5rem",
-                  backgroundColor: "#f9fafb",
-                  borderRadius: "0.25rem",
+                  padding: "0.75rem",
+                  backgroundColor: "#0f172a",
+                  borderRadius: "0.375rem",
                   marginTop: "0.5rem",
-                  fontSize: "0.875rem"
+                  fontSize: "0.8rem",
+                  border: "1px solid #334155"
                 }}>
-                  <p style={{ margin: "0.25rem 0" }}>
-                    <strong>Vendor:</strong> {example.vendor || "Unknown"}
-                  </p>
-                  <p style={{ margin: "0.25rem 0" }}>
-                    <strong>Amount:</strong> ${example.amount}
-                  </p>
-                  <p style={{ margin: "0.25rem 0" }}>
-                    <strong>Similarity:</strong> {(example.score * 100).toFixed(1)}%
-                  </p>
-                  {example.text && (
-                    <p style={{ margin: "0.25rem 0", color: "#6b7280" }}>
-                      {example.text}...
-                    </p>
-                  )}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                    <span style={{ color: "#e2e8f0", fontWeight: "500" }}>{example.vendor || "Unknown"}</span>
+                    <span style={{ color: "#10b981" }}>{(example.score * 100).toFixed(0)}% match</span>
+                  </div>
+                  <span style={{ color: "#64748b" }}>${example.amount}</span>
                 </div>
               ))}
             </div>
@@ -372,67 +445,159 @@ const VendorResearch = ({ vendorName, jsonData }) => {
   const renderGeminiPrediction = (geminiCategorization) => {
     if (!geminiCategorization || geminiCategorization.error) {
       return (
-        <div className="gemini-not-available">
-          <p>{geminiCategorization?.error || "No Gemini categorization available"}</p>
+        <div style={{
+          padding: "1.5rem",
+          backgroundColor: "#1e293b",
+          borderRadius: "0.75rem",
+          border: "2px solid #334155",
+          minHeight: "300px",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center"
+        }}>
+          <div style={{
+            width: "48px",
+            height: "48px",
+            borderRadius: "50%",
+            backgroundColor: "#334155",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            marginBottom: "1rem"
+          }}>
+            <span style={{ fontSize: "1.5rem" }}>✨</span>
+          </div>
+          <p style={{ color: "#94a3b8", textAlign: "center" }}>
+            {geminiCategorization?.error || "No Gemini categorization available"}
+          </p>
         </div>
       );
     }
 
     const isSelected = selectedMethod === "gemini";
+    const confidencePercent = geminiCategorization.confidence || 0;
 
     return (
       <div
-        className={`categorization-option ${isSelected ? "selected" : ""}`}
         onClick={() => setSelectedMethod("gemini")}
         style={{
           cursor: "pointer",
-          border: isSelected ? "3px solid #4f46e5" : "2px solid #e5e7eb",
-          borderRadius: "0.5rem",
+          border: isSelected ? "3px solid #8b5cf6" : "2px solid #334155",
+          borderRadius: "0.75rem",
           padding: "1.5rem",
-          backgroundColor: isSelected ? "#f0f9ff" : "white",
-          transition: "all 0.2s"
+          backgroundColor: isSelected ? "#2e1065" : "#1e293b",
+          transition: "all 0.2s",
+          display: "flex",
+          flexDirection: "column",
+          height: "100%"
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <h4 style={{ margin: 0, color: "#1f2937" }}>
-            {isSelected && "✓ "} Gemini AI Categorization
-          </h4>
+        {/* Header */}
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "1.25rem",
+          paddingBottom: "1rem",
+          borderBottom: "1px solid #334155"
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            {isSelected && <span style={{ color: "#8b5cf6", fontSize: "1.25rem" }}>✓</span>}
+            <h4 style={{ margin: 0, color: "#f1f5f9", fontSize: "1.125rem", fontWeight: "600" }}>
+              Gemini AI
+            </h4>
+          </div>
           <div style={{
-            padding: "0.25rem 0.75rem",
+            padding: "0.375rem 1rem",
             borderRadius: "9999px",
-            backgroundColor: getConfidenceColor((geminiCategorization.confidence || 0) / 100),
+            backgroundColor: getConfidenceColor(confidencePercent / 100),
             color: "white",
             fontSize: "0.875rem",
             fontWeight: "600"
           }}>
-            {geminiCategorization.confidence || 0}% confident
+            {confidencePercent}% confident
           </div>
         </div>
 
-        <div className="categorization-header">
-          <span className="category-name">
-            {geminiCategorization.category || "Uncategorized"} - {geminiCategorization.subcategory || "N/A"}
-          </span>
-          <span className="category-tag" data-type={geminiCategorization.ledgerType || "Unknown"}>
-            {geminiCategorization.ledgerType || "Unknown"}
-          </span>
+        {/* Category Result */}
+        <div style={{
+          backgroundColor: "#0f172a",
+          padding: "1rem",
+          borderRadius: "0.5rem",
+          marginBottom: "1.25rem"
+        }}>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "0.5rem"
+          }}>
+            <span style={{ color: "#e2e8f0", fontSize: "1rem", fontWeight: "500" }}>
+              {geminiCategorization.category || "Uncategorized"} / {geminiCategorization.subcategory || "N/A"}
+            </span>
+            <span style={{
+              padding: "0.25rem 0.75rem",
+              borderRadius: "0.25rem",
+              backgroundColor: "#7c3aed",
+              color: "white",
+              fontSize: "0.75rem",
+              fontWeight: "600",
+              textTransform: "uppercase"
+            }}>
+              {geminiCategorization.ledgerType || "Unknown"}
+            </span>
+          </div>
         </div>
 
-        <div className="categorization-details" style={{ marginTop: "1rem" }}>
-          <p><strong>Company:</strong> {geminiCategorization.companyName || "Not specified"}</p>
-          <p><strong>Description:</strong> {geminiCategorization.description || "No description available"}</p>
+        {/* Details */}
+        <div style={{ flex: 1 }}>
+          <div style={{ marginBottom: "0.75rem" }}>
+            <span style={{ color: "#a78bfa", fontWeight: "600", fontSize: "0.875rem" }}>
+              Company:
+            </span>
+            <span style={{ color: "#94a3b8", fontSize: "0.875rem", marginLeft: "0.5rem" }}>
+              {geminiCategorization.companyName || "Not specified"}
+            </span>
+          </div>
+          <p style={{ fontSize: "0.875rem", color: "#94a3b8", marginBottom: "0.75rem", lineHeight: "1.5" }}>
+            {geminiCategorization.description || "No description available"}
+          </p>
+        </div>
 
-          {geminiCategorization.explanation && (
-            <div className="explanation-section" style={{ marginTop: "1rem" }}>
-              <h4 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>Explanation</h4>
-              <div className="explanation-content" style={{ fontSize: "0.875rem", color: "#374151" }}>
-                {geminiCategorization.explanation.split('\n').map((paragraph, i) => (
-                  <p key={i}>{paragraph}</p>
-                ))}
-              </div>
+        {/* Explanation */}
+        {geminiCategorization.explanation && (
+          <details style={{ marginTop: "1rem", borderTop: "1px solid #334155", paddingTop: "1rem" }}>
+            <summary style={{
+              cursor: "pointer",
+              fontWeight: "600",
+              color: "#8b5cf6",
+              fontSize: "0.875rem",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem"
+            }}>
+              <span>▶</span> View AI Reasoning
+            </summary>
+            <div style={{
+              marginTop: "0.75rem",
+              padding: "0.75rem",
+              backgroundColor: "#0f172a",
+              borderRadius: "0.375rem",
+              fontSize: "0.8rem",
+              color: "#94a3b8",
+              lineHeight: "1.6",
+              maxHeight: "200px",
+              overflowY: "auto",
+              border: "1px solid #334155"
+            }}>
+              {geminiCategorization.explanation.split('\n').map((paragraph, i) => (
+                <p key={i} style={{ marginBottom: "0.5rem" }}>{paragraph}</p>
+              ))}
             </div>
-          )}
-        </div>
+          </details>
+        )}
       </div>
     );
   };
@@ -591,11 +756,72 @@ const VendorResearch = ({ vendorName, jsonData }) => {
       )}
 
       {categorization && (
-        <div className="financial-categorization">
-          <h3 className="section-title">
-            Financial Categorization - Choose Your Preferred Method
-          </h3>
+        <div style={{
+          marginTop: "2rem",
+          padding: "1.5rem",
+          backgroundColor: "#0f172a",
+          borderRadius: "1rem",
+          border: "1px solid #1e293b"
+        }}>
+          {/* Section Header */}
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: "1.5rem",
+            paddingBottom: "1rem",
+            borderBottom: "1px solid #334155"
+          }}>
+            <div>
+              <h3 style={{
+                margin: 0,
+                color: "#f1f5f9",
+                fontSize: "1.25rem",
+                fontWeight: "700",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.75rem"
+              }}>
+                <span style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "36px",
+                  height: "36px",
+                  borderRadius: "0.5rem",
+                  background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)"
+                }}>
+                  <span style={{ fontSize: "1.125rem" }}>📊</span>
+                </span>
+                Choose Categorization Method
+              </h3>
+              <p style={{
+                margin: "0.5rem 0 0 0",
+                color: "#64748b",
+                fontSize: "0.875rem"
+              }}>
+                Click on the card you prefer. ML learns from history, Gemini provides contextual analysis.
+              </p>
+            </div>
+            {selectedMethod && (
+              <div style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                padding: "0.5rem 1rem",
+                borderRadius: "9999px",
+                backgroundColor: selectedMethod === "ml" ? "#1e3a5f" : "#2e1065",
+                border: `2px solid ${selectedMethod === "ml" ? "#3b82f6" : "#8b5cf6"}`
+              }}>
+                <span style={{ color: selectedMethod === "ml" ? "#3b82f6" : "#8b5cf6", fontSize: "0.875rem" }}>✓</span>
+                <span style={{ color: "#e2e8f0", fontSize: "0.875rem", fontWeight: "500" }}>
+                  {selectedMethod === "ml" ? "ML Selected" : "Gemini Selected"}
+                </span>
+              </div>
+            )}
+          </div>
 
+          {/* Prediction Cards Grid */}
           <div style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
@@ -606,29 +832,46 @@ const VendorResearch = ({ vendorName, jsonData }) => {
             {renderGeminiPrediction(categorization.geminiCategorization)}
           </div>
 
+          {/* Save Button */}
           {selectedMethod && (
-            <div style={{ textAlign: "center" }}>
+            <div style={{
+              textAlign: "center",
+              padding: "1.5rem",
+              backgroundColor: "#1e293b",
+              borderRadius: "0.75rem",
+              border: "1px solid #334155"
+            }}>
               <button
                 onClick={saveCategorizationDecision}
                 style={{
-                  padding: "0.75rem 2rem",
-                  backgroundColor: "#10b981",
+                  padding: "1rem 2.5rem",
+                  background: "linear-gradient(135deg, #10b981 0%, #059669 100%)",
                   color: "white",
                   border: "none",
-                  borderRadius: "0.5rem",
-                  fontSize: "1rem",
-                  fontWeight: "600",
+                  borderRadius: "0.75rem",
+                  fontSize: "1.125rem",
+                  fontWeight: "700",
                   cursor: "pointer",
-                  boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
-                  transition: "all 0.2s"
+                  boxShadow: "0 4px 14px rgba(16, 185, 129, 0.4)",
+                  transition: "all 0.2s",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.75rem"
                 }}
-                onMouseOver={(e) => e.target.style.backgroundColor = "#059669"}
-                onMouseOut={(e) => e.target.style.backgroundColor = "#10b981"}
+                onMouseOver={(e) => {
+                  e.target.style.transform = "translateY(-2px)";
+                  e.target.style.boxShadow = "0 6px 20px rgba(16, 185, 129, 0.5)";
+                }}
+                onMouseOut={(e) => {
+                  e.target.style.transform = "translateY(0)";
+                  e.target.style.boxShadow = "0 4px 14px rgba(16, 185, 129, 0.4)";
+                }}
               >
-                💾 Save & Learn from This Decision
+                <span style={{ fontSize: "1.25rem" }}>💾</span>
+                Save & Train System
               </button>
-              <p style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#6b7280" }}>
-                Your choice will improve future predictions
+              <p style={{ marginTop: "0.75rem", fontSize: "0.875rem", color: "#94a3b8" }}>
+                Your selection helps improve future categorization accuracy
               </p>
             </div>
           )}
@@ -649,15 +892,21 @@ const VendorResearch = ({ vendorName, jsonData }) => {
               />
               <div style={{
                 marginTop: "1rem",
-                padding: "0.75rem",
-                backgroundColor: "#dbeafe",
-                border: "1px solid #60a5fa",
-                borderRadius: "0.375rem",
+                padding: "0.75rem 1rem",
+                backgroundColor: "#1e3a5f",
+                border: "1px solid #3b82f6",
+                borderRadius: "0.5rem",
                 fontSize: "0.875rem",
-                color: "#1e40af"
+                color: "#93c5fd",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "0.75rem"
               }}>
-                <strong>💡 Tip:</strong> Found a mistake? Use the editor above to correct the categorization.
-                Your corrections help the ML system learn and improve!
+                <span style={{ fontSize: "1.125rem" }}>💡</span>
+                <div>
+                  <strong style={{ color: "#60a5fa" }}>Tip:</strong> Found a mistake? Use the editor above to correct the categorization.
+                  Your corrections help the ML system learn and improve!
+                </div>
               </div>
             </div>
           )}
