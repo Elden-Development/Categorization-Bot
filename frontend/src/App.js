@@ -1,9 +1,12 @@
 // App.js
 import React, { useState, useEffect } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
+import { ToastProvider } from "./ToastContext";
+import ErrorBoundary from "./ErrorBoundary";
 import PDFProcessor from "./PDFProcessor";
 import ReviewQueue from "./ReviewQueue";
 import StatementResults from "./StatementResults";
+import InsightsDashboard from "./InsightsDashboard";
 import Login from "./Login";
 import Register from "./Register";
 import "./App.css";
@@ -149,13 +152,26 @@ const MainApp = () => {
             </svg>
             Statement Results
           </button>
+          <button
+            className={`nav-tab ${activeTab === 'insights' ? 'active' : ''}`}
+            onClick={() => setActiveTab('insights')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21.21 15.89A10 10 0 1 1 8 2.83" />
+              <path d="M22 12A10 10 0 0 0 12 2v10z" />
+            </svg>
+            Insights
+          </button>
         </nav>
       </div>
 
       <div className="app-content">
-        {activeTab === 'processor' && <PDFProcessor />}
-        {activeTab === 'review' && <ReviewQueue />}
-        {activeTab === 'results' && <StatementResults />}
+        <ErrorBoundary>
+          {activeTab === 'processor' && <PDFProcessor />}
+          {activeTab === 'review' && <ReviewQueue />}
+          {activeTab === 'results' && <StatementResults />}
+          {activeTab === 'insights' && <InsightsDashboard />}
+        </ErrorBoundary>
       </div>
     </div>
   );
@@ -185,12 +201,16 @@ const AppContent = () => {
   return <MainApp />;
 };
 
-// Root App with AuthProvider
+// Root App with AuthProvider and ToastProvider
 function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <ErrorBoundary>
+      <ToastProvider>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }
 

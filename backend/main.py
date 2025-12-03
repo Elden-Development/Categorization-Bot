@@ -2588,6 +2588,176 @@ async def get_correction_stats():
             "error": f"Error getting correction stats: {str(e)}"
         }
 
+@app.get("/insights/dashboard", tags=["Insights"])
+async def get_insights_dashboard(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get comprehensive insights and statistics for the categorization dashboard.
+
+    Returns:
+    - Overall categorization statistics
+    - Category distribution
+    - Confidence distribution
+    - Approval rates
+    - Learning progress metrics
+    - Recent activity
+    """
+    try:
+        from sqlalchemy import func, case
+        from datetime import datetime, timedelta
+
+        user_id = current_user.id
+
+        # Get total categorizations for user
+        total_categorizations = db.query(func.count(models.Categorization.id)).filter(
+            models.Categorization.user_id == user_id
+        ).scalar() or 0
+
+        # Get approved vs pending
+        approved_count = db.query(func.count(models.Categorization.id)).filter(
+            models.Categorization.user_id == user_id,
+            models.Categorization.user_approved == True
+        ).scalar() or 0
+
+        # Get user modified (corrections)
+        corrections_count = db.query(func.count(models.Categorization.id)).filter(
+            models.Categorization.user_id == user_id,
+            models.Categorization.user_modified == True
+        ).scalar() or 0
+
+        # Get method distribution
+        method_distribution = db.query(
+            models.Categorization.method,
+            func.count(models.Categorization.id).label('count')
+        ).filter(
+            models.Categorization.user_id == user_id
+        ).group_by(models.Categorization.method).all()
+
+        method_stats = {method: count for method, count in method_distribution}
+
+        # Get category distribution (top 10)
+        category_distribution = db.query(
+            models.Categorization.category,
+            func.count(models.Categorization.id).label('count'),
+            func.sum(
+                case(
+                    (models.BankTransaction.amount != None, models.BankTransaction.amount),
+                    else_=0
+                )
+            ).label('total_amount')
+        ).outerjoin(
+            models.BankTransaction,
+            models.Categorization.bank_transaction_id == models.BankTransaction.id
+        ).filter(
+            models.Categorization.user_id == user_id
+        ).group_by(
+            models.Categorization.category
+        ).order_by(
+            func.count(models.Categorization.id).desc()
+        ).limit(10).all()
+
+        category_stats = [
+            {
+                "category": cat,
+                "count": count,
+                "total_amount": float(amount) if amount else 0
+            }
+            for cat, count, amount in category_distribution
+        ]
+
+        # Get confidence distribution
+        confidence_ranges = db.query(
+            case(
+                (models.Categorization.confidence_score >= 90, 'high'),
+                (models.Categorization.confidence_score >= 70, 'medium'),
+                (models.Categorization.confidence_score >= 50, 'low'),
+                else_='very_low'
+            ).label('confidence_level'),
+            func.count(models.Categorization.id).label('count')
+        ).filter(
+            models.Categorization.user_id == user_id,
+            models.Categorization.confidence_score != None
+        ).group_by('confidence_level').all()
+
+        confidence_stats = {level: count for level, count in confidence_ranges}
+
+        # Get average confidence
+        avg_confidence = db.query(
+            func.avg(models.Categorization.confidence_score)
+        ).filter(
+            models.Categorization.user_id == user_id,
+            models.Categorization.confidence_score != None
+        ).scalar()
+
+        # Get bank statement stats
+        total_statements = db.query(func.count(models.BankStatement.id)).filter(
+            models.BankStatement.user_id == user_id
+        ).scalar() or 0
+
+        total_bank_transactions = db.query(func.count(models.BankTransaction.id)).filter(
+            models.BankTransaction.user_id == user_id
+        ).scalar() or 0
+
+        # Get recent activity (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_categorizations = db.query(func.count(models.Categorization.id)).filter(
+            models.Categorization.user_id == user_id,
+            models.Categorization.created_at >= seven_days_ago
+        ).scalar() or 0
+
+        # Calculate approval rate
+        approval_rate = (approved_count / total_categorizations * 100) if total_categorizations > 0 else 0
+
+        # Calculate accuracy estimate (approved without modification)
+        auto_approved = approved_count - corrections_count
+        accuracy_estimate = (auto_approved / approved_count * 100) if approved_count > 0 else 0
+
+        # Get ML stats if available
+        ml_stats = None
+        try:
+            engine = get_ml_categorization_engine()
+            ml_stats = await engine.get_database_stats()
+        except:
+            pass
+
+        return {
+            "success": True,
+            "insights": {
+                "overview": {
+                    "total_categorizations": total_categorizations,
+                    "approved_count": approved_count,
+                    "pending_count": total_categorizations - approved_count,
+                    "corrections_count": corrections_count,
+                    "approval_rate": round(approval_rate, 1),
+                    "accuracy_estimate": round(accuracy_estimate, 1),
+                    "average_confidence": round(float(avg_confidence), 1) if avg_confidence else 0
+                },
+                "bank_statements": {
+                    "total_statements": total_statements,
+                    "total_transactions": total_bank_transactions
+                },
+                "method_distribution": method_stats,
+                "category_distribution": category_stats,
+                "confidence_distribution": confidence_stats,
+                "recent_activity": {
+                    "last_7_days": recent_categorizations
+                },
+                "ml_stats": ml_stats
+            }
+        }
+
+    except Exception as e:
+        print(f"Error getting insights dashboard: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting insights: {str(e)}"
+        )
+
+
 @app.get("/categories")
 async def get_categories():
     """

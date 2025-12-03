@@ -56,7 +56,16 @@ const StatementResults = () => {
       const response = await fetch(`${API_BASE_URL}/categories`);
       if (response.ok) {
         const data = await response.json();
-        setCategories(data.categories || []);
+        // Transform grouped data into the format we need: [{name, subcategories: []}]
+        if (data.grouped) {
+          const transformedCategories = Object.entries(data.grouped).map(([name, subs]) => ({
+            name,
+            subcategories: subs.map(s => s.subcategory)
+          }));
+          setCategories(transformedCategories);
+        } else {
+          setCategories([]);
+        }
       }
     } catch (err) {
       console.error('Error fetching categories:', err);
