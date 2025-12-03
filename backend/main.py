@@ -2633,6 +2633,37 @@ async def get_subcategories(category: str):
 
 # Bank Statement Reconciliation Endpoints
 
+@app.get("/bank-statements", tags=["Bank Statements"])
+async def list_bank_statements(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List all bank statements for the current user.
+
+    Returns statements ordered by most recent upload first.
+    """
+    statements = crud.get_bank_statements_by_user(db, current_user.id, skip, limit)
+
+    return [
+        {
+            "id": stmt.id,
+            "file_name": stmt.file_name,
+            "file_type": stmt.file_type,
+            "bank_name": stmt.bank_name,
+            "account_number": stmt.account_number,
+            "statement_date": str(stmt.statement_date) if stmt.statement_date else None,
+            "period_start": str(stmt.period_start) if stmt.period_start else None,
+            "period_end": str(stmt.period_end) if stmt.period_end else None,
+            "transaction_count": stmt.transaction_count or 0,
+            "uploaded_at": str(stmt.uploaded_at) if stmt.uploaded_at else None
+        }
+        for stmt in statements
+    ]
+
+
 @app.post("/parse-bank-statement")
 async def parse_bank_statement(
     file: UploadFile = File(...),
@@ -3443,6 +3474,276 @@ class ApproveCategorizationRequest(BaseModel):
     corrected_subcategory: Optional[str] = None
     corrected_ledger_type: Optional[str] = None
     review_notes: Optional[str] = None
+
+
+class ApproveBankTransactionRequest(BaseModel):
+    """Request model for approving/correcting a bank transaction categorization"""
+    bank_transaction_id: int
+    approved: bool
+    corrected_category: Optional[str] = None
+    corrected_subcategory: Optional[str] = None
+    corrected_ledger_type: Optional[str] = None
+    review_notes: Optional[str] = None
+
+
+class BulkApproveBankTransactionsRequest(BaseModel):
+    """Request model for bulk approving bank transaction categorizations"""
+    bank_transaction_ids: Optional[List[int]] = Field(
+        default=None,
+        description="List of specific bank transaction IDs to approve"
+    )
+    bank_statement_id: Optional[int] = Field(
+        default=None,
+        description="Approve all categorized transactions for this bank statement"
+    )
+    min_confidence: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Only approve transactions with confidence >= this threshold"
+    )
+    approve_all_high_confidence: bool = Field(
+        default=False,
+        description="Approve all high-confidence transactions (uses user's confidence threshold)"
+    )
+
+
+@app.post("/bank-transaction/bulk-approve", tags=["Bank Statements"])
+async def bulk_approve_bank_transaction_categorizations(
+    request: BulkApproveBankTransactionsRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk approve multiple bank transaction categorizations at once.
+
+    **Options:**
+    1. **By transaction IDs**: Provide a list of specific bank_transaction_ids to approve
+    2. **By bank statement**: Provide bank_statement_id to approve all categorized transactions
+    3. **By confidence threshold**: Add min_confidence to only approve above that confidence
+    4. **High confidence auto-approve**: Set approve_all_high_confidence=true
+    """
+    try:
+        # Validate request
+        if not request.bank_transaction_ids and not request.bank_statement_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must provide either bank_transaction_ids or bank_statement_id"
+            )
+
+        # Get user's confidence threshold
+        user_threshold = 70.0
+        if request.approve_all_high_confidence:
+            user_settings = current_user.settings or {}
+            user_threshold = user_settings.get("confidence_threshold", 70.0)
+
+        # Determine effective threshold
+        effective_threshold = None
+        if request.approve_all_high_confidence:
+            effective_threshold = user_threshold
+        elif request.min_confidence is not None:
+            effective_threshold = request.min_confidence
+
+        approved_count = 0
+        skipped_count = 0
+        approved_ids = []
+        skipped_info = []
+
+        # Get bank transactions to process
+        if request.bank_transaction_ids:
+            bank_txs = db.query(models.BankTransaction).filter(
+                models.BankTransaction.id.in_(request.bank_transaction_ids),
+                models.BankTransaction.user_id == current_user.id
+            ).all()
+        else:
+            # Verify statement exists
+            statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+            if not statement:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Bank statement not found"
+                )
+            bank_txs = crud.get_bank_transactions_by_statement(db, current_user.id, request.bank_statement_id)
+
+        for bank_tx in bank_txs:
+            # Get categorization
+            categorization = crud.get_categorization_for_bank_transaction(
+                db, current_user.id, bank_tx.id
+            )
+
+            if not categorization:
+                skipped_info.append({"id": bank_tx.id, "reason": "No categorization"})
+                skipped_count += 1
+                continue
+
+            if categorization.user_approved:
+                skipped_info.append({"id": bank_tx.id, "reason": "Already approved"})
+                skipped_count += 1
+                continue
+
+            # Check confidence threshold
+            if effective_threshold is not None:
+                confidence = float(categorization.confidence_score) if categorization.confidence_score else 0
+                if confidence < effective_threshold:
+                    skipped_info.append({
+                        "id": bank_tx.id,
+                        "reason": f"Below threshold ({confidence:.1f}% < {effective_threshold}%)"
+                    })
+                    skipped_count += 1
+                    continue
+
+            # Approve
+            categorization.user_approved = True
+            categorization.user_modified = False
+            approved_ids.append(bank_tx.id)
+            approved_count += 1
+
+        db.commit()
+
+        # Log activity
+        crud.log_activity(
+            db=db,
+            user_id=current_user.id,
+            action="bulk_bank_categorization_approved",
+            entity_type="bank_statement",
+            entity_id=request.bank_statement_id,
+            details={
+                "approved_count": approved_count,
+                "skipped_count": skipped_count,
+                "threshold": effective_threshold
+            }
+        )
+
+        return {
+            "success": True,
+            "approved_count": approved_count,
+            "skipped_count": skipped_count,
+            "total_processed": approved_count + skipped_count,
+            "message": f"Approved {approved_count} transactions, skipped {skipped_count}",
+            "approved_transactions": approved_ids,
+            "skipped_transactions": skipped_info
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error in bulk approve: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error during bulk approve: {str(e)}"
+        )
+
+
+@app.post("/bank-transaction/approve", tags=["Bank Statements"])
+async def approve_bank_transaction_categorization(
+    request: ApproveBankTransactionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Approve or correct a bank transaction categorization.
+
+    If approved: Mark categorization as user_approved
+    If corrected: Update categorization with new values
+    """
+    try:
+        # Find the bank transaction
+        bank_tx = db.query(models.BankTransaction).filter(
+            models.BankTransaction.id == request.bank_transaction_id,
+            models.BankTransaction.user_id == current_user.id
+        ).first()
+
+        if not bank_tx:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Bank transaction not found"
+            )
+
+        # Get categorization for this bank transaction
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, request.bank_transaction_id
+        )
+
+        if not categorization:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Categorization not found for this transaction"
+            )
+
+        if request.approved:
+            # Simple approval
+            categorization.user_approved = True
+            categorization.user_modified = False
+            db.commit()
+
+            # Log activity
+            crud.log_activity(
+                db=db,
+                user_id=current_user.id,
+                action="bank_categorization_approved",
+                entity_type="categorization",
+                entity_id=categorization.id,
+                details={"bank_transaction_id": request.bank_transaction_id}
+            )
+
+            return {
+                "success": True,
+                "message": "Categorization approved",
+                "action": "approved"
+            }
+
+        else:
+            # User is correcting the categorization
+            if not request.corrected_category:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Corrected category is required"
+                )
+
+            # Update the categorization
+            categorization.category = request.corrected_category
+            categorization.subcategory = request.corrected_subcategory or ""
+            categorization.ledger_type = request.corrected_ledger_type or "Expense"
+            categorization.method = "manual"
+            categorization.confidence_score = 100.0  # User corrections are 100% confident
+            categorization.user_approved = True
+            categorization.user_modified = True
+
+            # Also update the bank transaction category field
+            bank_tx.category = request.corrected_category
+
+            db.commit()
+
+            # Log activity
+            crud.log_activity(
+                db=db,
+                user_id=current_user.id,
+                action="bank_categorization_corrected",
+                entity_type="categorization",
+                entity_id=categorization.id,
+                details={
+                    "bank_transaction_id": request.bank_transaction_id,
+                    "corrected_category": request.corrected_category,
+                    "corrected_subcategory": request.corrected_subcategory
+                }
+            )
+
+            return {
+                "success": True,
+                "message": "Categorization corrected",
+                "action": "corrected"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error approving bank transaction categorization: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing approval: {str(e)}"
+        )
 
 
 @app.post("/review-queue/approve", tags=["Review"])
@@ -5194,6 +5495,179 @@ async def get_statement_categorization_status(
         "needs_review": needs_review,
         "uncategorized": uncategorized,
         "completion_percentage": (categorized / total * 100) if total > 0 else 0
+    }
+
+
+@app.get("/bank-statement/{statement_id}/results", tags=["Bank Statements"])
+async def get_statement_results(
+    statement_id: int,
+    sort_by: Optional[str] = Query(default="date", description="Sort by: date, amount, category, confidence, status"),
+    sort_order: Optional[str] = Query(default="desc", description="Sort order: asc or desc"),
+    filter_status: Optional[str] = Query(default=None, description="Filter by status: approved, needs_review, uncategorized"),
+    filter_category: Optional[str] = Query(default=None, description="Filter by category name"),
+    min_confidence: Optional[float] = Query(default=None, description="Minimum confidence score (0-100)"),
+    max_confidence: Optional[float] = Query(default=None, description="Maximum confidence score (0-100)"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get complete categorization results for a bank statement.
+
+    Returns all transactions with their categorizations, summary statistics,
+    and category breakdown. Supports sorting and filtering.
+
+    **Sort options:** date, amount, category, confidence, status
+    **Filter options:** approved, needs_review, uncategorized
+    """
+    # Verify the bank statement exists and belongs to the user
+    statement = crud.get_bank_statement_by_id(db, current_user.id, statement_id)
+    if not statement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bank statement with ID {statement_id} not found"
+        )
+
+    # Get user's confidence threshold
+    user_settings = current_user.settings or {}
+    confidence_threshold = user_settings.get("confidence_threshold", 70.0)
+
+    # Get all transactions
+    bank_transactions = crud.get_bank_transactions_by_statement(
+        db, current_user.id, statement_id
+    )
+
+    # Build results with categorizations
+    transactions = []
+    stats = {
+        "total": 0,
+        "categorized": 0,
+        "approved": 0,
+        "needs_review": 0,
+        "uncategorized": 0,
+        "high_confidence": 0,
+        "low_confidence": 0,
+        "total_amount": 0,
+        "approved_amount": 0
+    }
+    category_breakdown = {}
+
+    for tx in bank_transactions:
+        categorization = crud.get_categorization_for_bank_transaction(
+            db, current_user.id, tx.id
+        )
+
+        # Determine status
+        if categorization:
+            if categorization.user_approved:
+                tx_status = "approved"
+                stats["approved"] += 1
+                stats["approved_amount"] += float(tx.amount) if tx.amount else 0
+            else:
+                tx_status = "needs_review"
+                stats["needs_review"] += 1
+            stats["categorized"] += 1
+
+            # Confidence tracking
+            conf = categorization.confidence_score or 0
+            if conf >= confidence_threshold:
+                stats["high_confidence"] += 1
+            else:
+                stats["low_confidence"] += 1
+
+            # Category breakdown
+            cat = categorization.category or "Uncategorized"
+            if cat not in category_breakdown:
+                category_breakdown[cat] = {"count": 0, "amount": 0, "approved": 0}
+            category_breakdown[cat]["count"] += 1
+            category_breakdown[cat]["amount"] += float(tx.amount) if tx.amount else 0
+            if categorization.user_approved:
+                category_breakdown[cat]["approved"] += 1
+        else:
+            tx_status = "uncategorized"
+            stats["uncategorized"] += 1
+            cat = "Uncategorized"
+            if cat not in category_breakdown:
+                category_breakdown[cat] = {"count": 0, "amount": 0, "approved": 0}
+            category_breakdown[cat]["count"] += 1
+            category_breakdown[cat]["amount"] += float(tx.amount) if tx.amount else 0
+
+        stats["total"] += 1
+        stats["total_amount"] += float(tx.amount) if tx.amount else 0
+
+        # Apply filters
+        if filter_status and tx_status != filter_status:
+            continue
+        if filter_category and categorization and categorization.category != filter_category:
+            continue
+        if filter_category and not categorization and filter_category != "Uncategorized":
+            continue
+        if min_confidence is not None:
+            if not categorization or (categorization.confidence_score or 0) < min_confidence:
+                continue
+        if max_confidence is not None:
+            if categorization and (categorization.confidence_score or 0) > max_confidence:
+                continue
+
+        # Build transaction record
+        tx_record = {
+            "id": tx.id,
+            "transaction_date": str(tx.transaction_date) if tx.transaction_date else None,
+            "description": tx.description,
+            "amount": float(tx.amount) if tx.amount else 0,
+            "transaction_type": tx.transaction_type or ("debit" if tx.amount and tx.amount < 0 else "credit"),
+            "status": tx_status,
+            "category": categorization.category if categorization else None,
+            "subcategory": categorization.subcategory if categorization else None,
+            "ledger_type": categorization.ledger_type if categorization else None,
+            "confidence": float(categorization.confidence_score) if categorization and categorization.confidence_score else None,
+            "method": categorization.method if categorization else None,
+            "user_approved": categorization.user_approved if categorization else False,
+            "categorization_id": categorization.id if categorization else None
+        }
+        transactions.append(tx_record)
+
+    # Sort transactions
+    sort_keys = {
+        "date": lambda x: x["transaction_date"] or "",
+        "amount": lambda x: abs(x["amount"]),
+        "category": lambda x: x["category"] or "zzz",  # Put None at end
+        "confidence": lambda x: x["confidence"] or 0,
+        "status": lambda x: x["status"]
+    }
+
+    if sort_by in sort_keys:
+        reverse = sort_order.lower() == "desc"
+        transactions.sort(key=sort_keys[sort_by], reverse=reverse)
+
+    # Calculate percentages
+    stats["completion_percentage"] = (stats["categorized"] / stats["total"] * 100) if stats["total"] > 0 else 0
+    stats["approval_percentage"] = (stats["approved"] / stats["categorized"] * 100) if stats["categorized"] > 0 else 0
+
+    return {
+        "statement": {
+            "id": statement.id,
+            "file_name": statement.file_name,
+            "bank_name": statement.bank_name,
+            "account_number": statement.account_number,
+            "period_start": str(statement.period_start) if statement.period_start else None,
+            "period_end": str(statement.period_end) if statement.period_end else None,
+            "uploaded_at": str(statement.uploaded_at) if statement.uploaded_at else None
+        },
+        "summary": stats,
+        "category_breakdown": [
+            {"category": cat, **data}
+            for cat, data in sorted(category_breakdown.items(), key=lambda x: x[1]["count"], reverse=True)
+        ],
+        "transactions": transactions,
+        "filters_applied": {
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "filter_status": filter_status,
+            "filter_category": filter_category,
+            "min_confidence": min_confidence,
+            "max_confidence": max_confidence
+        },
+        "confidence_threshold": confidence_threshold
     }
 
 

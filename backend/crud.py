@@ -399,6 +399,18 @@ def get_bank_statement_by_id(
     ).first()
 
 
+def get_bank_statements_by_user(
+    db: Session,
+    user_id: int,
+    skip: int = 0,
+    limit: int = 50
+) -> List[models.BankStatement]:
+    """Get all bank statements for a user, ordered by most recent first"""
+    return db.query(models.BankStatement).filter(
+        models.BankStatement.user_id == user_id
+    ).order_by(models.BankStatement.uploaded_at.desc()).offset(skip).limit(limit).all()
+
+
 def get_categorization_for_bank_transaction(
     db: Session,
     user_id: int,

@@ -3,6 +3,7 @@ import React, { useState, useEffect } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
 import PDFProcessor from "./PDFProcessor";
 import ReviewQueue from "./ReviewQueue";
+import StatementResults from "./StatementResults";
 import Login from "./Login";
 import Register from "./Register";
 import "./App.css";
@@ -136,11 +137,25 @@ const MainApp = () => {
               <span className="review-badge">{reviewQueueCount}</span>
             )}
           </button>
+          <button
+            className={`nav-tab ${activeTab === 'results' ? 'active' : ''}`}
+            onClick={() => setActiveTab('results')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 3v18h18" />
+              <path d="M18 17V9" />
+              <path d="M13 17V5" />
+              <path d="M8 17v-3" />
+            </svg>
+            Statement Results
+          </button>
         </nav>
       </div>
 
       <div className="app-content">
-        {activeTab === 'processor' ? <PDFProcessor /> : <ReviewQueue />}
+        {activeTab === 'processor' && <PDFProcessor />}
+        {activeTab === 'review' && <ReviewQueue />}
+        {activeTab === 'results' && <StatementResults />}
       </div>
     </div>
   );
