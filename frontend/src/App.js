@@ -74,6 +74,7 @@ const UserMenu = () => {
 
 // Main app component (protected content)
 const MainApp = () => {
+  const { token } = useAuth();
   const [activeTab, setActiveTab] = useState('processor');
   const [reviewQueueCount, setReviewQueueCount] = useState(0);
 
@@ -81,8 +82,13 @@ const MainApp = () => {
 
   // Fetch review queue count for badge
   const fetchReviewQueueCount = async () => {
+    if (!token) return;
     try {
-      const response = await fetch(`${API_BASE_URL}/review-queue/stats`);
+      const response = await fetch(`${API_BASE_URL}/review-queue/stats`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       if (response.ok) {
         const data = await response.json();
         setReviewQueueCount(data.total_needs_review || 0);
@@ -98,7 +104,7 @@ const MainApp = () => {
     const interval = setInterval(fetchReviewQueueCount, 30000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [token]);
 
   // Refresh count when switching to processor tab
   useEffect(() => {

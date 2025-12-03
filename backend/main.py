@@ -29,6 +29,7 @@ from vendor_mapping import categorize_by_vendor, get_all_known_vendors, normaliz
 
 # Database imports
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from database import get_db, init_db, test_connection
 from auth import get_current_user, get_optional_user, authenticate_user, create_access_token, hash_password
 import crud
