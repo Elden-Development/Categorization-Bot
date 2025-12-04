@@ -4837,17 +4837,29 @@ def process_batch_categorization_job(
     statement_id: int,
     confidence_threshold: float,
     use_vendor_mapping: bool,
-    bank_transactions: list,
+    total_transactions: int,
     db_session_factory
 ):
     """Background task to process batch categorization with progress tracking"""
     from database import SessionLocal
 
+    print(f"[BATCH] Starting batch job {job_id} for statement {statement_id} with {total_transactions} transactions")
+
     # Create a new database session for this background task
     db = SessionLocal()
 
     try:
+        # Re-query the transactions in this session to avoid detached object issues
+        bank_transactions = crud.get_bank_transactions_by_statement(db, user_id, statement_id)
+        if not bank_transactions:
+            print(f"[BATCH ERROR] No transactions found for statement {statement_id}")
+            batch_job_tracker.fail_job(job_id, "No transactions found in database")
+            return
+
+        print(f"[BATCH] Retrieved {len(bank_transactions)} transactions from database")
+
         batch_job_tracker.start_job(job_id)
+        print(f"[BATCH] Job {job_id} started, processing...")
 
         processed = 0
         failed = 0
@@ -5012,6 +5024,11 @@ def process_batch_categorization_job(
                     low_confidence += 1
 
             except Exception as tx_error:
+                # Log the error for debugging
+                print(f"[BATCH ERROR] Failed to categorize transaction {bank_tx.id}: {str(tx_error)}")
+                import traceback
+                traceback.print_exc()
+
                 # Rollback the failed transaction to allow subsequent operations
                 db.rollback()
                 failed += 1
@@ -5114,7 +5131,8 @@ async def start_async_batch_categorization(
     # Need to import SessionLocal for the background task
     from database import SessionLocal
 
-    # Start background task
+    # Start background task - pass transaction count instead of ORM objects
+    # to avoid detached object issues in the background thread
     background_tasks.add_task(
         process_batch_categorization_job,
         job_id=job_id,
@@ -5122,7 +5140,7 @@ async def start_async_batch_categorization(
         statement_id=request.bank_statement_id,
         confidence_threshold=confidence_threshold,
         use_vendor_mapping=use_vendor_mapping,
-        bank_transactions=bank_transactions,
+        total_transactions=len(bank_transactions),
         db_session_factory=SessionLocal
     )
 
