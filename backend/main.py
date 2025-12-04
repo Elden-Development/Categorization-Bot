@@ -4894,6 +4894,10 @@ def process_batch_categorization_job(
         failed = 0
         high_confidence = 0
         low_confidence = 0
+        gemini_calls = 0  # Track Gemini API calls for rate limiting
+        import time
+        BATCH_SIZE = 10  # Pause after every N Gemini API calls
+        BATCH_PAUSE = 2.0  # Longer pause between batches
 
         for bank_tx in bank_transactions:
             try:
@@ -4992,9 +4996,15 @@ def process_batch_categorization_job(
                             ml_conf = 0
                             gemini_conf = confidence
 
-                            # Add small delay between Gemini calls to avoid rate limiting
-                            import time
-                            time.sleep(0.3)  # 300ms delay between API calls
+                            # Track Gemini API calls and add delays to avoid rate limiting
+                            gemini_calls += 1
+                            if gemini_calls % BATCH_SIZE == 0:
+                                # Longer pause after every batch of Gemini calls
+                                print(f"[BATCH] Completed {gemini_calls} Gemini API calls, pausing {BATCH_PAUSE}s...")
+                                time.sleep(BATCH_PAUSE)
+                            else:
+                                # Small delay between individual calls
+                                time.sleep(0.3)
                     except Exception as cat_error:
                         # If categorization fails, use defaults - mark as manual for review
                         category = "Operating Expenses"
