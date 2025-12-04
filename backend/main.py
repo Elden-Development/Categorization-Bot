@@ -4963,13 +4963,13 @@ def process_batch_categorization_job(
                             ml_conf = 0
                             gemini_conf = confidence
                     except Exception as cat_error:
-                        # If categorization fails, use defaults
+                        # If categorization fails, use defaults - mark as manual for review
                         category = "Operating Expenses"
                         subcategory = "General Operating"
                         ledger_type = "Expense (Operating)"
-                        confidence = 50
-                        method = "default"
-                        explanation = f"Default categorization (error: {str(cat_error)[:50]})"
+                        confidence = 30  # Low confidence since auto-categorization failed
+                        method = "manual"  # Needs manual review
+                        explanation = f"Categorization failed, needs manual review (error: {str(cat_error)[:50]})"
                         ml_conf = 0
                         gemini_conf = 0
 
