@@ -2314,10 +2314,13 @@ async def categorize_transaction_hybrid(request: HybridCategorizationRequest):
         print(f"Error in hybrid categorization: {str(e)}")
         return {"error": f"Error in hybrid categorization: {str(e)}"}
 
-async def _get_gemini_categorization(vendor_info: str, document_data: dict, transaction_purpose: str) -> dict:
+async def _get_gemini_categorization(vendor_info: str, document_data: dict, transaction_purpose: str, max_retries: int = 3) -> dict:
     """
-    Helper function to get Gemini AI categorization (extracted from existing endpoint).
+    Helper function to get Gemini AI categorization with retry logic for rate limits.
+    Uses exponential backoff when hitting rate limits (429 errors).
     """
+    import random
+
     # Create a prompt that includes the categorization options and asks Gemini to categorize the transaction
     prompt = f"""
     Based on the information below, please categorize this transaction according to accounting principles.
@@ -2428,16 +2431,42 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
     classification aligns with standard chart of accounts structures.
     """
 
-    # Send the request to Gemini API
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config={
-            "max_output_tokens": 4000,
-            "response_mime_type": "application/json"
-        }
-    )
+    # Send the request to Gemini API with retry logic
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config={
+                    "max_output_tokens": 4000,
+                    "response_mime_type": "application/json"
+                }
+            )
+            # If successful, break out of retry loop
+            break
+        except Exception as api_error:
+            last_error = api_error
+            error_str = str(api_error).lower()
+
+            # Check if it's a rate limit error (429) or resource exhausted
+            is_rate_limit = "429" in error_str or "resource_exhausted" in error_str or "quota" in error_str
+
+            if is_rate_limit and attempt < max_retries - 1:
+                # Exponential backoff with jitter: 2^attempt * (1 + random) seconds
+                base_delay = 2 ** attempt  # 1, 2, 4 seconds
+                jitter = random.uniform(0.5, 1.5)
+                delay = base_delay * jitter
+                print(f"[GEMINI] Rate limit hit, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(delay)
+                continue
+            else:
+                # Not a rate limit error or max retries reached
+                raise api_error
+    else:
+        # All retries exhausted
+        return {"error": f"Rate limit exceeded after {max_retries} retries: {str(last_error)}", "confidence": 0}
 
     # Parse and return the response
     try:
@@ -4962,6 +4991,10 @@ def process_batch_categorization_job(
                             explanation = gemini_result.get("explanation", "AI categorization")
                             ml_conf = 0
                             gemini_conf = confidence
+
+                            # Add small delay between Gemini calls to avoid rate limiting
+                            import time
+                            time.sleep(0.3)  # 300ms delay between API calls
                     except Exception as cat_error:
                         # If categorization fails, use defaults - mark as manual for review
                         category = "Operating Expenses"
