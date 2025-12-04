@@ -171,6 +171,8 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
 
 .stat-value {
@@ -183,6 +185,8 @@
 .stat-label {
   font-size: 0.875rem;
   color: var(--text-secondary);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 /* Metrics Section */
@@ -608,6 +612,33 @@
 
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-3);
+  }
+
+  .stat-card {
+    padding: var(--space-3);
+    gap: var(--space-2);
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .stat-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  .stat-icon svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .stat-value {
+    font-size: 1.5rem;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    line-height: 1.3;
   }
 
   .bank-stats-grid {
@@ -619,6 +650,13 @@
   }
 
   .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Extra small screens */
+@media (max-width: 400px) {
+  .stats-grid {
     grid-template-columns: 1fr;
   }
 }
