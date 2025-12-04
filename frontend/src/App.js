@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
 import { ToastProvider } from "./ToastContext";
+import { ThemeProvider, ThemeToggle } from "./ThemeContext";
 import ErrorBoundary from "./ErrorBoundary";
 import PDFProcessor from "./PDFProcessor";
 import ReviewQueue from "./ReviewQueue";
@@ -120,7 +121,10 @@ const MainApp = () => {
       <div className="app-header">
         <div className="app-header-content">
           <h1>Categorization Bot</h1>
-          <UserMenu />
+          <div className="header-actions">
+            <ThemeToggle />
+            <UserMenu />
+          </div>
         </div>
         <nav className="app-nav">
           <button
@@ -207,15 +211,17 @@ const AppContent = () => {
   return <MainApp />;
 };
 
-// Root App with AuthProvider and ToastProvider
+// Root App with Providers
 function App() {
   return (
     <ErrorBoundary>
-      <ToastProvider>
-        <AuthProvider>
-          <AppContent />
-        </AuthProvider>
-      </ToastProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <AppContent />
+          </AuthProvider>
+        </ToastProvider>
+      </ThemeProvider>
     </ErrorBoundary>
   );
 }

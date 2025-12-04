@@ -221,6 +221,12 @@ const PDFProcessor = () => {
 
       updateDocumentStatus(docId, 'processing', 100);
 
+      // Check if this is a bank statement uploaded to the wrong section
+      const detectedDocType = jsonData.documentMetadata?.documentType?.toLowerCase() || '';
+      const isBankStatement = detectedDocType.includes('bank') ||
+                              detectedDocType.includes('statement') ||
+                              detectedDocType === 'bankstatement';
+
       // Update document with parsed data and categorization
       setDocuments(prev => prev.map(d =>
         d.id === docId
@@ -231,15 +237,21 @@ const PDFProcessor = () => {
               parsedData: jsonData,
               categorization: categorization,
               processedAt: new Date().toISOString(),
-              error: null
+              error: null,
+              isBankStatement: isBankStatement // Flag for UI warning
             }
           : d
       ));
 
-      const confidenceMsg = categorization?.confidence
-        ? ` (Confidence: ${categorization.confidence.toFixed(1)}%)`
-        : '';
-      setMessage(`Document "${doc.fileName}" processed successfully${confidenceMsg}`);
+      // Show appropriate message based on document type
+      if (isBankStatement) {
+        setMessage(`"${doc.fileName}" appears to be a bank statement. For best results, please upload it in the Bank Statement section (right side) to parse individual transactions.`);
+      } else {
+        const confidenceMsg = categorization?.confidence
+          ? ` (Confidence: ${categorization.confidence.toFixed(1)}%)`
+          : '';
+        setMessage(`Document "${doc.fileName}" processed successfully${confidenceMsg}`);
+      }
 
     } catch (error) {
       console.error(`Error processing document ${doc.fileName}:`, error);
@@ -760,149 +772,232 @@ const PDFProcessor = () => {
 
         <div className="two-column-layout">
           {/* LEFT COLUMN - DOCUMENT UPLOAD */}
-          <div className="card">
-            <div className="section-title">1. Document Extraction</div>
-            <h2>Upload Document</h2>
-            <p className="description">
-              Upload an invoice, receipt, or financial document to extract structured data.
-            </p>
-
-            <div>
-              {/* Schema selector */}
-              <SchemaSelector
-                selectedSchema={selectedSchema}
-                onSchemaChange={handleSchemaChange}
-              />
-
-              <div className="form-group">
-                <label htmlFor="pdfFile" className="form-label">Upload Documents (Multiple Supported)</label>
-                <div
-                  ref={dropContainerRef}
-                  className={`file-input-container ${dragActive ? 'drag-active' : ''}`}
-                  onDragEnter={handleDragEnterForZone}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDragLeave={handleDragLeaveForZone}
-                  onDrop={handleDropForZone}
-                >
-                  <div className="pulse-ring"></div>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  <div className="file-input-text">
-                    <div className="file-input-title">Choose documents or drag and drop</div>
-                    <div className="file-input-description">PDF, JPG, PNG (max. 10MB per file) - Auto-processes</div>
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    id="pdfFile"
-                    accept="application/pdf, image/*"
-                    className="file-input"
-                    onChange={handleFileChange}
-                    multiple
-                  />
-                </div>
-                {isProcessingBatch && (
-                  <div className="processing-status">
-                    <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="12" y1="2" x2="12" y2="6" />
-                      <line x1="12" y1="18" x2="12" y2="22" />
-                      <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
-                      <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-                      <line x1="2" y1="12" x2="6" y2="12" />
-                      <line x1="18" y1="12" x2="22" y2="12" />
-                      <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
-                      <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-                    </svg>
-                    <span>Processing documents...</span>
-                  </div>
-                )}
-                {message && (
-                  <div className="status-message">{message}</div>
-                )}
+          <div className="card extraction-card">
+            <div className="extraction-header">
+              <div className="extraction-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="16" y1="13" x2="8" y2="13" />
+                  <line x1="16" y1="17" x2="8" y2="17" />
+                </svg>
+              </div>
+              <div>
+                <div className="section-title">1. Document Extraction</div>
+                <h2>Upload Document</h2>
               </div>
             </div>
+
+            <p className="description">
+              Upload invoices, receipts, or financial documents to automatically extract and categorize data.
+            </p>
+
+            {/* Schema selector */}
+            <SchemaSelector
+              selectedSchema={selectedSchema}
+              onSchemaChange={handleSchemaChange}
+            />
+
+            <div
+              ref={dropContainerRef}
+              className={`document-upload-zone ${dragActive ? 'drag-active' : ''}`}
+              onDragEnter={handleDragEnterForZone}
+              onDragOver={(e) => e.preventDefault()}
+              onDragLeave={handleDragLeaveForZone}
+              onDrop={handleDropForZone}
+            >
+              <div className="document-upload-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </div>
+              <div className="document-upload-text">
+                <span className="document-upload-title">Drop your documents here</span>
+                <span className="document-upload-subtitle">or click to browse</span>
+              </div>
+              <div className="document-upload-formats">
+                <span className="format-badge">PDF</span>
+                <span className="format-badge">JPG</span>
+                <span className="format-badge">PNG</span>
+                <span className="format-size">Max 10MB each</span>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                id="pdfFile"
+                accept="application/pdf, image/*"
+                className="file-input"
+                onChange={handleFileChange}
+                multiple
+              />
+            </div>
+
+            {/* Document Processing Status */}
+            <div className="extraction-status">
+              <div className="status-item">
+                <span className="status-label">In Queue</span>
+                <span className="status-value">{documents.filter(d => d.status === 'pending' || d.status === 'processing').length}</span>
+              </div>
+              <div className="status-divider"></div>
+              <div className="status-item">
+                <span className="status-label">Completed</span>
+                <span className={`status-value ${documents.filter(d => d.status === 'completed').length > 0 ? 'ready' : ''}`}>
+                  {documents.filter(d => d.status === 'completed').length}
+                </span>
+              </div>
+              <div className="status-divider"></div>
+              <div className="status-item">
+                <span className="status-label">Failed</span>
+                <span className={`status-value ${documents.filter(d => d.status === 'error').length > 0 ? 'error' : ''}`}>
+                  {documents.filter(d => d.status === 'error').length}
+                </span>
+              </div>
+            </div>
+
+            {isProcessingBatch && (
+              <div className="processing-indicator">
+                <div className="processing-spinner">
+                  <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" opacity="0.25" />
+                    <path d="M12 2a10 10 0 0 1 10 10" />
+                  </svg>
+                </div>
+                <span>Processing documents...</span>
+              </div>
+            )}
+
+            {message && !isProcessingBatch && (
+              <div className="extraction-message">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                <span>{message}</span>
+              </div>
+            )}
           </div>
 
           {/* RIGHT COLUMN - BANK STATEMENT */}
-          <div className="card">
-            <div className="section-title">2. Reconciliation</div>
-            <h2>Bank Statement</h2>
+          <div className="card reconciliation-card">
+            <div className="reconciliation-header">
+              <div className="reconciliation-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="3" y1="9" x2="21" y2="9"></line>
+                  <line x1="9" y1="21" x2="9" y2="9"></line>
+                </svg>
+              </div>
+              <div>
+                <div className="section-title">2. Reconciliation</div>
+                <h2>Bank Statement</h2>
+              </div>
+            </div>
+
             <p className="description">
-              Upload your bank statement to reconcile against {documents.filter(d => d.status === 'completed').length || 'all'} processed document(s).
+              Upload your bank statement to reconcile against your processed documents and verify transactions.
             </p>
 
             <form onSubmit={handleReconcile}>
-              <div className="form-group">
-                <label htmlFor="bankFile" className="form-label">Upload Bank Statement</label>
-                <div 
-                  ref={bankDropContainerRef}
-                  className={`file-input-container ${bankDragActive ? 'drag-active' : ''}`}
-                  onDragEnter={handleBankDragEnterForZone}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDragLeave={handleBankDragLeaveForZone}
-                  onDrop={handleBankDropForZone}
-                >
-                  <div className="pulse-ring"></div>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                    <line x1="3" y1="9" x2="21" y2="9"></line>
-                    <line x1="9" y1="21" x2="9" y2="9"></line>
-                  </svg>
-                  <div className="file-input-text">
-                    <div className="file-input-title">Choose a bank statement or drag and drop</div>
-                    <div className="file-input-description">CSV, PDF (max. 10MB)</div>
-                  </div>
-                  <input
-                    ref={bankFileInputRef}
-                    type="file"
-                    id="bankFile"
-                    accept=".csv, application/pdf"
-                    className="file-input"
-                    onChange={handleBankFileChange}
-                  />
-                </div>
-                {bankFile && (
-                  <div className="file-name">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                      <polyline points="22 4 12 14.01 9 11.01" />
-                    </svg>
-                    <span>{bankFile.name}</span>
+              <div
+                ref={bankDropContainerRef}
+                className={`bank-upload-zone ${bankDragActive ? 'drag-active' : ''} ${bankFile ? 'has-file' : ''}`}
+                onDragEnter={handleBankDragEnterForZone}
+                onDragOver={(e) => e.preventDefault()}
+                onDragLeave={handleBankDragLeaveForZone}
+                onDrop={handleBankDropForZone}
+              >
+                {!bankFile ? (
+                  <>
+                    <div className="bank-upload-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="17 8 12 3 7 8" />
+                        <line x1="12" y1="3" x2="12" y2="15" />
+                      </svg>
+                    </div>
+                    <div className="bank-upload-text">
+                      <span className="bank-upload-title">Drop your bank statement here</span>
+                      <span className="bank-upload-subtitle">or click to browse</span>
+                    </div>
+                    <div className="bank-upload-formats">
+                      <span className="format-badge">CSV</span>
+                      <span className="format-badge">PDF</span>
+                      <span className="format-size">Max 10MB</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="bank-file-selected">
+                    <div className="bank-file-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                      </svg>
+                    </div>
+                    <div className="bank-file-info">
+                      <span className="bank-file-name">{bankFile.name}</span>
+                      <span className="bank-file-size">{(bankFile.size / 1024).toFixed(1)} KB</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="bank-file-remove"
+                      onClick={(e) => { e.stopPropagation(); setBankFile(null); }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
                   </div>
                 )}
+                <input
+                  ref={bankFileInputRef}
+                  type="file"
+                  id="bankFile"
+                  accept=".csv, application/pdf"
+                  className="file-input"
+                  onChange={handleBankFileChange}
+                />
+              </div>
+
+              <div className="reconciliation-status">
+                <div className="status-item">
+                  <span className="status-label">Documents Ready</span>
+                  <span className="status-value">{documents.filter(d => d.status === 'completed').length}</span>
+                </div>
+                <div className="status-divider"></div>
+                <div className="status-item">
+                  <span className="status-label">Statement</span>
+                  <span className={`status-value ${bankFile ? 'ready' : 'pending'}`}>
+                    {bankFile ? 'Uploaded' : 'Pending'}
+                  </span>
+                </div>
               </div>
 
               <button
                 type="submit"
-                className="btn bank-btn"
-                disabled={!bankFile || documents.filter(d => d.status === 'completed').length === 0 || reconciliationLoading}>
+                className="btn btn-reconcile"
+                disabled={!bankFile || documents.filter(d => d.status === 'completed').length === 0 || reconciliationLoading}
+              >
                 {reconciliationLoading ? (
-                  <>
-                    <div className="spinner-button">
-                      <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="12" y1="2" x2="12" y2="6" />
-                        <line x1="12" y1="18" x2="12" y2="22" />
-                        <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
-                        <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-                        <line x1="2" y1="12" x2="6" y2="12" />
-                        <line x1="18" y1="12" x2="22" y2="12" />
-                        <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
-                        <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-                      </svg>
-                      Reconciling...
-                    </div>
-                  </>
+                  <div className="spinner-button">
+                    <svg className="spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" opacity="0.25" />
+                      <path d="M12 2a10 10 0 0 1 10 10" />
+                    </svg>
+                    <span>Reconciling Transactions...</span>
+                  </div>
                 ) : (
                   <>
                     <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-                      <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-                      <path d="M9 14l2 2 4-4"></path>
+                      <path d="M9 11l3 3L22 4" />
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
                     </svg>
-                    Reconcile Transactions
+                    <span>Reconcile Transactions</span>
                   </>
                 )}
               </button>

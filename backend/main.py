@@ -121,6 +121,147 @@ def get_user_friendly_error(error: Exception) -> str:
 
 
 # ============================================================================
+# GEMINI AI BANK STATEMENT PARSER
+# ============================================================================
+
+BANK_STATEMENT_PROMPT = """You are a bank statement parser. Analyze this bank statement PDF and extract ALL transactions.
+
+For each transaction, extract:
+1. date: The transaction date in YYYY-MM-DD format
+2. description: The transaction description/memo/payee
+3. amount: The transaction amount as a number (positive for deposits/credits, negative for withdrawals/debits)
+4. type: Either "credit" (deposits, incoming money) or "debit" (withdrawals, outgoing money)
+5. balance: The running balance after this transaction (if available)
+
+Important parsing rules:
+- Look for tabular data with columns like Date, Description, Debit, Credit, Balance
+- If there are separate Debit and Credit columns, use the Debit value as negative amount and Credit value as positive
+- Parse ALL transactions on ALL pages
+- Ignore header rows, summary sections, and bank information
+- Convert all dates to YYYY-MM-DD format
+- Remove currency symbols from amounts, keep just the number
+- If a transaction spans multiple lines, combine the description
+
+Return a JSON object with this structure:
+{
+    "transactions": [
+        {
+            "date": "2024-01-15",
+            "description": "PAYROLL DEPOSIT",
+            "amount": 2500.00,
+            "type": "credit",
+            "balance": 5000.00
+        },
+        {
+            "date": "2024-01-16",
+            "description": "WALMART STORE #1234",
+            "amount": -45.67,
+            "type": "debit",
+            "balance": 4954.33
+        }
+    ],
+    "statement_info": {
+        "bank_name": "Bank Name if found",
+        "account_number": "Last 4 digits if found",
+        "period_start": "Statement start date",
+        "period_end": "Statement end date",
+        "opening_balance": "Opening balance if found",
+        "closing_balance": "Closing balance if found"
+    }
+}
+
+Parse all transactions from the bank statement:"""
+
+
+async def parse_bank_statement_with_gemini(file_content: bytes) -> List[Dict]:
+    """
+    Parse a PDF bank statement using Gemini AI.
+
+    This is used as a fallback when the basic regex parser returns no results,
+    which happens with tabular PDF formats.
+
+    Parameters:
+    file_content (bytes): PDF file content
+
+    Returns:
+    List[Dict]: List of extracted transactions
+    """
+    try:
+        # Create a Gemini Part from the PDF bytes
+        file_part = types.Part.from_bytes(
+            data=file_content,
+            mime_type="application/pdf"
+        )
+
+        # Call Gemini to extract transactions
+        async def extract_transactions():
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=[BANK_STATEMENT_PROMPT, file_part],
+                config={
+                    "max_output_tokens": 40000,
+                    "response_mime_type": "application/json"
+                }
+            )
+
+        response = await retry_with_backoff(extract_transactions, max_retries=3, initial_delay=2)
+
+        if not response or not response.text:
+            print("Warning: Gemini returned empty response for bank statement")
+            return []
+
+        # Parse the JSON response
+        result_text = response.text.strip()
+        print(f"Gemini bank statement response length: {len(result_text)} chars")
+
+        # Clean up potential markdown formatting
+        if result_text.startswith("```json"):
+            result_text = result_text[7:]
+        if result_text.startswith("```"):
+            result_text = result_text[3:]
+        if result_text.endswith("```"):
+            result_text = result_text[:-3]
+        result_text = result_text.strip()
+
+        parsed_data = json.loads(result_text)
+
+        transactions = parsed_data.get("transactions", [])
+        statement_info = parsed_data.get("statement_info", {})
+
+        print(f"Gemini extracted {len(transactions)} transactions from bank statement")
+
+        # Normalize transactions to expected format
+        normalized_transactions = []
+        for idx, tx in enumerate(transactions):
+            normalized = {
+                "transaction_id": f"gemini_tx_{idx}",
+                "date": tx.get("date"),
+                "description": tx.get("description", "").strip(),
+                "amount": tx.get("amount"),
+                "type": tx.get("type", "debit" if tx.get("amount", 0) < 0 else "credit"),
+                "source": "gemini_ai"  # Mark source for debugging
+            }
+
+            # Include balance if available
+            if tx.get("balance") is not None:
+                normalized["balance"] = tx.get("balance")
+
+            # Only include transactions with required fields
+            if normalized["date"] and normalized["amount"] is not None:
+                normalized_transactions.append(normalized)
+
+        return normalized_transactions
+
+    except json.JSONDecodeError as e:
+        print(f"Error parsing Gemini JSON response: {str(e)}")
+        return []
+    except Exception as e:
+        print(f"Error parsing bank statement with Gemini: {str(e)}")
+        return []
+
+
+# ============================================================================
 # BATCH JOB TRACKING SYSTEM
 # ============================================================================
 
@@ -2863,12 +3004,25 @@ async def parse_bank_statement(
     try:
         file_content = await file.read()
         file_type = file.content_type
+        parsing_method = "basic"  # Track which parser was used
 
         # Initialize parser
         parser = BankStatementParser()
 
-        # Parse the statement
+        # Parse the statement with basic parser first
         transactions = parser.parse(file_content, file_type)
+
+        # If basic parser returns no transactions for PDF, try Gemini AI
+        if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
+            print(f"Basic parser found 0 transactions in PDF, trying Gemini AI...")
+            try:
+                transactions = await parse_bank_statement_with_gemini(file_content)
+                if len(transactions) > 0:
+                    parsing_method = "gemini_ai"
+                    print(f"Gemini AI successfully extracted {len(transactions)} transactions")
+            except Exception as gemini_error:
+                print(f"Gemini AI parsing failed: {str(gemini_error)}")
+                # Keep transactions as empty list from basic parser
 
         # Save to database if user is authenticated
         db_statement = None
@@ -2920,7 +3074,8 @@ async def parse_bank_statement(
             "count": len(transactions),
             "file_name": file.filename,
             "file_type": file_type,
-            "statement_id": db_statement.id if db_statement else None
+            "statement_id": db_statement.id if db_statement else None,
+            "parsing_method": parsing_method  # Track which parser was used
         }
 
     except Exception as e:

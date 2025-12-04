@@ -199,16 +199,28 @@ const DocumentList = ({
                 </div>
 
                 {doc.status === 'completed' && (
-                  <div className="document-info-brief">
-                    <span className="vendor-brief">{getVendorName(doc)}</span>
-                    <span className="amount-brief">{formatCurrency(getDocumentAmount(doc))}</span>
-                    <span className="date-brief">{formatDate(getDocumentDate(doc))}</span>
-                    {doc.categorization?.confidence !== undefined && (
-                      <span className={`confidence-badge-inline ${getConfidenceClass(doc.categorization.confidence)}`}>
-                        {doc.categorization.confidence.toFixed(0)}%
-                      </span>
+                  <>
+                    <div className="document-info-brief">
+                      <span className="vendor-brief">{getVendorName(doc)}</span>
+                      <span className="amount-brief">{formatCurrency(getDocumentAmount(doc))}</span>
+                      <span className="date-brief">{formatDate(getDocumentDate(doc))}</span>
+                      {doc.categorization?.confidence !== undefined && (
+                        <span className={`confidence-badge-inline ${getConfidenceClass(doc.categorization.confidence)}`}>
+                          {doc.categorization.confidence.toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+                    {doc.isBankStatement && (
+                      <div className="document-warning-message">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10" />
+                          <line x1="12" y1="8" x2="12" y2="12" />
+                          <line x1="12" y1="16" x2="12.01" y2="16" />
+                        </svg>
+                        <span>Bank statement detected - upload in the Bank Statement section for better results</span>
+                      </div>
                     )}
-                  </div>
+                  </>
                 )}
 
                 {doc.status === 'error' && doc.error && (
