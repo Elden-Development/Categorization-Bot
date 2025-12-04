@@ -239,7 +239,7 @@ class Categorization(Base):
     # Constraints
     __table_args__ = (
         CheckConstraint(
-            "method IN ('ml', 'gemini', 'manual', 'hybrid')",
+            "method IN ('ml', 'gemini', 'manual', 'hybrid', 'vendor_mapping')",
             name="categorizations_method_check"
         ),
     )
