@@ -2314,12 +2314,54 @@ async def categorize_transaction_hybrid(request: HybridCategorizationRequest):
         print(f"Error in hybrid categorization: {str(e)}")
         return {"error": f"Error in hybrid categorization: {str(e)}"}
 
+# Cache for Gemini categorization results to avoid duplicate API calls
+# Key: normalized vendor description, Value: categorization result
+_gemini_cache: dict = {}
+_GEMINI_CACHE_MAX_SIZE = 1000  # Limit cache size to prevent memory issues
+
+def _normalize_for_cache(vendor_info: str) -> str:
+    """Normalize vendor info for cache key - removes numbers and extra spaces."""
+    import re
+    # Remove numbers (transaction IDs, store numbers, etc.)
+    normalized = re.sub(r'\d+', '', vendor_info.lower())
+    # Remove special characters and collapse spaces
+    normalized = re.sub(r'[^\w\s]', ' ', normalized)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+def _get_from_cache(vendor_info: str) -> dict | None:
+    """Get cached categorization result if available."""
+    cache_key = _normalize_for_cache(vendor_info)
+    return _gemini_cache.get(cache_key)
+
+def _add_to_cache(vendor_info: str, result: dict) -> None:
+    """Add categorization result to cache."""
+    global _gemini_cache
+    # Limit cache size
+    if len(_gemini_cache) >= _GEMINI_CACHE_MAX_SIZE:
+        # Remove oldest entries (first 100)
+        keys_to_remove = list(_gemini_cache.keys())[:100]
+        for key in keys_to_remove:
+            del _gemini_cache[key]
+
+    cache_key = _normalize_for_cache(vendor_info)
+    _gemini_cache[cache_key] = result
+
 async def _get_gemini_categorization(vendor_info: str, document_data: dict, transaction_purpose: str, max_retries: int = 3) -> dict:
     """
     Helper function to get Gemini AI categorization with retry logic for rate limits.
     Uses exponential backoff when hitting rate limits (429 errors).
+    Includes caching to avoid duplicate API calls for similar transactions.
     """
     import random
+
+    # Check cache first
+    cached_result = _get_from_cache(vendor_info)
+    if cached_result:
+        # Return cached result with a note
+        result = cached_result.copy()
+        result["from_cache"] = True
+        return result
 
     # Create a prompt that includes the categorization options and asks Gemini to categorize the transaction
     prompt = f"""
@@ -2495,6 +2537,9 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
                 categorization_json["confidence"] = 50  # Default to 50% if parsing fails
         else:
             categorization_json["confidence"] = 50  # Default confidence if missing
+
+        # Cache successful result for future similar queries
+        _add_to_cache(vendor_info, categorization_json)
 
         return categorization_json
     except json.JSONDecodeError:
