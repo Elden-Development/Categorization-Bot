@@ -89,7 +89,11 @@ export const AuthProvider = ({ children }) => {
       return { success: true };
     } catch (error) {
       console.error('Login error:', error);
-      return { success: false, error: error.message };
+      // Provide user-friendly message for network errors
+      const message = error instanceof TypeError && error.message.includes('fetch')
+        ? 'Network error. Please check your internet connection.'
+        : error.message;
+      return { success: false, error: message };
     }
   };
 
@@ -115,7 +119,11 @@ export const AuthProvider = ({ children }) => {
       return await login(username, password);
     } catch (error) {
       console.error('Registration error:', error);
-      return { success: false, error: error.message };
+      // Provide user-friendly message for network errors
+      const message = error instanceof TypeError && error.message.includes('fetch')
+        ? 'Network error. Please check your internet connection.'
+        : error.message;
+      return { success: false, error: message };
     }
   };
 
@@ -135,22 +143,30 @@ export const AuthProvider = ({ children }) => {
     };
   };
 
-  // Helper for authenticated fetch
+  // Helper for authenticated fetch with network error handling
   const authFetch = async (url, options = {}) => {
     const headers = {
       ...options.headers,
       ...getAuthHeaders()
     };
 
-    const response = await fetch(url, { ...options, headers });
+    try {
+      const response = await fetch(url, { ...options, headers });
 
-    // If 401, token expired - logout
-    if (response.status === 401) {
-      logout();
-      throw new Error('Session expired. Please login again.');
+      // If 401, token expired - logout
+      if (response.status === 401) {
+        logout();
+        throw new Error('Session expired. Please login again.');
+      }
+
+      return response;
+    } catch (error) {
+      // Handle network errors (Failed to fetch)
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new Error('Network error. Please check your internet connection.');
+      }
+      throw error;
     }
-
-    return response;
   };
 
   const value = {

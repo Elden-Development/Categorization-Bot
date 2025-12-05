@@ -5,6 +5,7 @@ const ReviewQueue = () => {
   const [queueItems, setQueueItems] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
   const [correctionMode, setCorrectionMode] = useState(false);
   const [correctionData, setCorrectionData] = useState({
@@ -21,6 +22,7 @@ const ReviewQueue = () => {
   const fetchQueueItems = async () => {
     try {
       setLoading(true);
+      setError(null);
       const response = await fetch(
         `${API_BASE_URL}/review-queue?min_confidence=${filterConfidence.min}&max_confidence=${filterConfidence.max}`
       );
@@ -28,10 +30,15 @@ const ReviewQueue = () => {
         const data = await response.json();
         setQueueItems(data);
       } else {
-        console.error('Failed to fetch review queue');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Server error: ${response.status}`);
       }
-    } catch (error) {
-      console.error('Error fetching review queue:', error);
+    } catch (err) {
+      console.error('Error fetching review queue:', err);
+      const message = err instanceof TypeError && err.message.includes('fetch')
+        ? 'Network error. Please check your connection.'
+        : err.message;
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -192,6 +199,12 @@ const ReviewQueue = () => {
       {/* Queue Items List */}
       {loading ? (
         <div className="loading">Loading review queue...</div>
+      ) : error ? (
+        <div className="error-state">
+          <h3>Unable to load review queue</h3>
+          <p>{error}</p>
+          <button onClick={fetchQueueItems} className="refresh-btn">Try Again</button>
+        </div>
       ) : queueItems.length === 0 ? (
         <div className="empty-queue">
           <h3>All Clear!</h3>

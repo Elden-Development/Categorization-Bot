@@ -460,6 +460,37 @@
   color: var(--text-secondary);
 }
 
+/* Error State */
+.error-state {
+  background: var(--surface-primary);
+  border: 1px solid var(--danger);
+  border-radius: var(--rounded-xl);
+  text-align: center;
+  padding: var(--space-12) var(--space-6);
+}
+
+.error-state h3 {
+  color: var(--danger);
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0 0 var(--space-3) 0;
+}
+
+.error-state p {
+  margin: 0 0 var(--space-4) 0;
+  color: var(--text-secondary);
+}
+
+.error-state .refresh-btn {
+  background: var(--danger);
+  color: white;
+  border: none;
+}
+
+.error-state .refresh-btn:hover {
+  background: #dc2626;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
   .review-queue-container {

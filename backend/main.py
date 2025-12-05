@@ -966,7 +966,7 @@ async def verify_extraction(json_data):
                         # Only keep discrepancies where values are numerically different
                         if abs(expected - actual) > 0.01:  # Allow for small rounding differences
                             significant_issues.append(d)
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         # If we can't convert to float, keep the discrepancy
                         significant_issues.append(d)
                 
@@ -1274,8 +1274,8 @@ async def process_file(
                             status="error",
                             error_message=error_detail
                         )
-                    except:
-                        pass
+                    except Exception as db_err:
+                        print(f"Warning: Failed to update document status: {db_err}")
                 raise HTTPException(status_code=422, detail=error_detail)
 
             # Perform extraction verification on the complete document
@@ -1311,8 +1311,8 @@ async def process_file(
                             status="error",
                             error_message=error_detail
                         )
-                    except:
-                        pass
+                    except Exception as db_err:
+                        print(f"Warning: Failed to update document status: {db_err}")
                 raise HTTPException(status_code=422, detail=error_detail)
 
             # Use schema-specific prompt template
@@ -1340,8 +1340,8 @@ async def process_file(
                             status="error",
                             error_message=error_detail
                         )
-                    except:
-                        pass
+                    except Exception as db_err:
+                        print(f"Warning: Failed to update document status: {db_err}")
                 raise HTTPException(status_code=422, detail=error_detail)
 
             # For non-PDF files (single page), add extraction verification
@@ -1360,8 +1360,8 @@ async def process_file(
                             status="error",
                             error_message=error_detail
                         )
-                    except:
-                        pass
+                    except Exception as db_err:
+                        print(f"Warning: Failed to update document status: {db_err}")
                 raise HTTPException(status_code=422, detail=error_detail)
 
         # Save final result to database if user is authenticated
