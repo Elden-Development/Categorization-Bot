@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import './ReviewQueue.css';
+import { useAuth } from './AuthContext';
 
 const ReviewQueue = () => {
+  const { token } = useAuth();
   const [queueItems, setQueueItems] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -20,11 +22,19 @@ const ReviewQueue = () => {
 
   // Fetch review queue items
   const fetchQueueItems = async () => {
+    if (!token) {
+      setError('Please log in to view the review queue.');
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
       const response = await fetch(
-        `${API_BASE_URL}/review-queue?min_confidence=${filterConfidence.min}&max_confidence=${filterConfidence.max}`
+        `${API_BASE_URL}/review-queue?min_confidence=${filterConfidence.min}&max_confidence=${filterConfidence.max}`,
+        {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
       );
       if (response.ok) {
         const data = await response.json();
@@ -46,8 +56,11 @@ const ReviewQueue = () => {
 
   // Fetch queue statistics
   const fetchStats = async () => {
+    if (!token) return;
     try {
-      const response = await fetch(`${API_BASE_URL}/review-queue/stats`);
+      const response = await fetch(`${API_BASE_URL}/review-queue/stats`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (response.ok) {
         const data = await response.json();
         setStats(data);
@@ -68,7 +81,10 @@ const ReviewQueue = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/review-queue/approve`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           transaction_id: item.transaction_id,
           approved: true
@@ -100,7 +116,10 @@ const ReviewQueue = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/review-queue/approve`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           transaction_id: item.transaction_id,
           approved: false,
