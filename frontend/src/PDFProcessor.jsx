@@ -130,6 +130,11 @@ const PDFProcessor = () => {
     updateDocumentStatus(docId, 'processing', 0);
 
     try {
+      // Check if file object exists (it won't exist for documents loaded from localStorage)
+      if (!doc.file) {
+        throw new Error('File no longer available. Please re-upload the document to process it again.');
+      }
+
       const formData = new FormData();
       formData.append("file", doc.file);
       formData.append("schema", selectedSchema);

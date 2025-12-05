@@ -66,9 +66,10 @@
 /* Stats Dashboard */
 .stats-dashboard {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+  overflow: visible;
 }
 
 .stat-card {
@@ -129,7 +130,14 @@
 .stat-card.high-conf h3 { color: #10b981; }
 
 .stat-card.amount::before { background: #8b5cf6; }
-.stat-card.amount h3 { color: #8b5cf6; }
+.stat-card.amount h3 {
+  color: #8b5cf6;
+  font-size: 1.5rem;
+  white-space: nowrap;
+}
+.stat-card.amount {
+  min-width: 200px;
+}
 
 /* Category Breakdown */
 .category-breakdown {
