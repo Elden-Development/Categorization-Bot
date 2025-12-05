@@ -1397,8 +1397,8 @@ tr.significance-Low, tr.confidence-Low {
 }
 
 .summary-card {
-  background: linear-gradient(135deg, #f9fafb 0%, #ffffff 100%);
-  border: 1px solid #e5e7eb;
+  background: var(--surface-primary);
+  border: 1px solid var(--surface-border);
   border-radius: var(--rounded-lg);
   padding: 1.5rem;
   display: flex;
@@ -1463,14 +1463,14 @@ tr.significance-Low, tr.confidence-Low {
 .summary-value {
   font-size: 2rem;
   font-weight: 700;
-  color: var(--dark-gray);
+  color: var(--text-primary);
   line-height: 1;
   margin-bottom: 0.25rem;
 }
 
 .summary-label {
   font-size: 0.875rem;
-  color: var(--medium-gray);
+  color: var(--text-secondary);
   font-weight: 500;
 }
 
@@ -1482,7 +1482,7 @@ tr.significance-Low, tr.confidence-Low {
 .section-subtitle {
   font-size: 1.25rem;
   font-weight: 600;
-  color: var(--dark-gray);
+  color: var(--text-primary);
   margin-bottom: 1.5rem;
   display: flex;
   align-items: center;
@@ -1520,8 +1520,8 @@ tr.significance-Low, tr.confidence-Low {
 }
 
 .match-card {
-  background-color: var(--white);
-  border: 2px solid #e5e7eb;
+  background-color: var(--surface-primary);
+  border: 2px solid var(--surface-border);
   border-radius: var(--rounded-lg);
   padding: 1.5rem;
   transition: var(--transition);
@@ -1568,7 +1568,7 @@ tr.significance-Low, tr.confidence-Low {
 .match-vendor {
   font-size: 1.125rem;
   font-weight: 600;
-  color: var(--dark-gray);
+  color: var(--text-primary);
   margin-bottom: 0.5rem;
   display: flex;
   align-items: center;
@@ -1583,7 +1583,7 @@ tr.significance-Low, tr.confidence-Low {
 
 .match-description {
   font-size: 0.9375rem;
-  color: var(--medium-gray);
+  color: var(--text-secondary);
 }
 
 .match-badges {
