@@ -92,15 +92,15 @@ def safe_get(data, *keys, default=None):
 
 
 # Retry helper for API calls with rate limiting
-async def retry_with_backoff(func, max_retries=7, initial_delay=5):
+async def retry_with_backoff(func, max_retries=3, initial_delay=2):
     """
     Retry an async function with exponential backoff and jitter.
     Specifically handles 429 RESOURCE_EXHAUSTED errors from Gemini API.
 
     Args:
         func: Async function to call (should be a coroutine or awaitable)
-        max_retries: Maximum number of retry attempts (default: 7)
-        initial_delay: Initial delay in seconds (default: 5, doubles each retry with jitter)
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay in seconds (default: 2, doubles each retry with jitter)
 
     Returns:
         The result of the function call
@@ -3171,11 +3171,22 @@ async def parse_bank_statement(
         if len(transactions) == 0 and gemini_error_message:
             return {
                 "success": False,
-                "error": f"Could not extract transactions: {gemini_error_message}",
+                "error": f"Could not extract transactions: {gemini_error_message}. TIP: Try exporting your bank statement as CSV instead of PDF - CSV files don't require AI processing.",
                 "transactions": [],
                 "count": 0,
                 "file_name": file.filename,
                 "retry_suggested": True
+            }
+
+        # If no transactions found from PDF (no Gemini error), suggest CSV
+        if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
+            return {
+                "success": False,
+                "error": "Could not extract transactions from this PDF. TIP: Most banks offer CSV export - try downloading your statement as CSV instead.",
+                "transactions": [],
+                "count": 0,
+                "file_name": file.filename,
+                "retry_suggested": False
             }
 
         return {
