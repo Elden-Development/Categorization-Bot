@@ -92,15 +92,15 @@ def safe_get(data, *keys, default=None):
 
 
 # Retry helper for API calls with rate limiting
-async def retry_with_backoff(func, max_retries=5, initial_delay=3):
+async def retry_with_backoff(func, max_retries=7, initial_delay=5):
     """
     Retry an async function with exponential backoff and jitter.
     Specifically handles 429 RESOURCE_EXHAUSTED errors from Gemini API.
 
     Args:
         func: Async function to call (should be a coroutine or awaitable)
-        max_retries: Maximum number of retry attempts (default: 5)
-        initial_delay: Initial delay in seconds (default: 3, doubles each retry with jitter)
+        max_retries: Maximum number of retry attempts (default: 7)
+        initial_delay: Initial delay in seconds (default: 5, doubles each retry with jitter)
 
     Returns:
         The result of the function call
@@ -480,7 +480,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Semaphore to limit concurrent Gemini API calls (prevents rate limiting)
 # Gemini has strict rate limits - limit to 2 concurrent calls with delays between batches
-GEMINI_SEMAPHORE = asyncio.Semaphore(2)
+GEMINI_SEMAPHORE = asyncio.Semaphore(1)  # Only 1 concurrent call - Gemini has strict rate limits
 
 
 # =============================================================================
@@ -1294,9 +1294,20 @@ async def process_file(
     try:
         if file.content_type == "application/pdf":
             pdf_reader = PdfReader(io.BytesIO(file_content))
-            # Process each page concurrently using the per-page processing function.
-            tasks = [process_page(page, schema) for page in pdf_reader.pages]
-            page_results = await asyncio.gather(*tasks)
+            total_pages = len(pdf_reader.pages)
+            print(f"Processing PDF with {total_pages} pages sequentially to avoid rate limits")
+
+            # Process pages SEQUENTIALLY to avoid Gemini rate limits
+            # Adding delay between pages for rate limit compliance
+            page_results = []
+            for i, page in enumerate(pdf_reader.pages):
+                print(f"Processing page {i + 1}/{total_pages}")
+                result = await process_page(page, schema)
+                page_results.append(result)
+
+                # Add delay between pages to respect rate limits (except after last page)
+                if i < total_pages - 1:
+                    await asyncio.sleep(1.5)  # 1.5 second delay between pages
 
             # Merge the JSON results from each page.
             merged_result = merge_page_results(page_results)
