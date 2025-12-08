@@ -13,12 +13,67 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Environment detection
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+IS_PRODUCTION = ENVIRONMENT in ("production", "prod")
+
+# Default credentials that indicate insecure configuration
+INSECURE_DB_PATTERNS = [
+    "postgres:postgres@",
+    "root:root@",
+    "admin:admin@",
+    "user:password@",
+    "password123",
+    ":@localhost",  # Empty password
+]
+
+
+def _get_database_url() -> str:
+    """
+    Get and validate the DATABASE_URL.
+
+    In production: Fails loudly if DATABASE_URL is not set or uses default credentials.
+    In development: Warns but allows default credentials for convenience.
+    """
+    db_url = os.getenv("DATABASE_URL", "").strip()
+
+    # Check if using default/missing URL
+    is_missing = not db_url
+
+    if is_missing:
+        if IS_PRODUCTION:
+            raise RuntimeError(
+                "FATAL: DATABASE_URL environment variable is not set. "
+                "This is required in production. "
+                "Format: postgresql://username:password@host:port/database"
+            )
+        else:
+            # Use default for development
+            db_url = "postgresql://postgres:postgres@localhost:5432/categorization_bot"
+            print("\n" + "=" * 70)
+            print("⚠️  WARNING: DATABASE_URL not configured!")
+            print("   Using default local development database.")
+            print("\n   To fix, add to your .env file:")
+            print('   DATABASE_URL="postgresql://user:pass@host:port/dbname"')
+            print("=" * 70 + "\n")
+            return db_url
+
+    # Check for insecure credentials in production
+    if IS_PRODUCTION:
+        for pattern in INSECURE_DB_PATTERNS:
+            if pattern in db_url:
+                raise RuntimeError(
+                    f"FATAL: DATABASE_URL appears to use insecure default credentials. "
+                    f"Pattern '{pattern}' detected. "
+                    "Please use secure credentials in production."
+                )
+
+    return db_url
+
+
 # Database URL from environment variable
 # Format: postgresql://username:password@localhost:5432/database_name
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/categorization_bot"
-)
+DATABASE_URL = _get_database_url()
 
 # Create SQLAlchemy engine
 # For production, use connection pooling: pool_size=10, max_overflow=20

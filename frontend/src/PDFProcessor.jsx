@@ -7,11 +7,15 @@ import DocumentList from "./DocumentList";
 import BatchProgressBar from "./BatchProgressBar";
 import ExportPanel from "./ExportPanel";
 import { useAuth } from "./AuthContext";
+import { useToast } from "./ToastContext";
 
 const PDFProcessor = () => {
   // Auth context - always call the hook unconditionally
   const authContext = useAuth();
   const token = authContext?.token || null;
+
+  // Toast notifications for user feedback
+  const toast = useToast();
   // Note: user available via authContext?.user if needed
 
   // Batch processing state
@@ -221,7 +225,8 @@ const PDFProcessor = () => {
         }
       } catch (catError) {
         console.error('Error during smart categorization:', catError);
-        // Continue without categorization if it fails
+        // Notify user that categorization failed but document was processed
+        toast.warning(`Document processed but auto-categorization failed: ${catError.message || 'Unknown error'}. You can categorize it manually.`);
       }
 
       updateDocumentStatus(docId, 'processing', 100);
@@ -272,6 +277,7 @@ const PDFProcessor = () => {
           : d
       ));
       setMessage(`Error processing "${doc.fileName}": ${error.message}`);
+      toast.error(`Failed to process "${doc.fileName}": ${error.message}`);
     } finally {
       // Remove from queue and continue to next
       setProcessingQueue(prev => prev.filter(id => id !== docId));
@@ -346,12 +352,12 @@ const PDFProcessor = () => {
         );
 
         if (validFiles.length === 0) {
-          alert("Please upload PDF or image files only.");
+          toast.warning("Please upload PDF or image files only.");
           return;
         }
 
         if (validFiles.length < droppedFiles.length) {
-          alert(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
+          toast.warning(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
         }
 
         // Add files to document queue
@@ -374,7 +380,7 @@ const PDFProcessor = () => {
       document.removeEventListener("drop", handleDrop);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [toast]);
 
   // Handle drag events specifically for the first drop zone
   const handleDragEnterForZone = (e) => {
@@ -405,12 +411,12 @@ const PDFProcessor = () => {
       );
 
       if (validFiles.length === 0) {
-        alert("Please upload PDF or image files only.");
+        toast.warning("Please upload PDF or image files only.");
         return;
       }
 
       if (validFiles.length < droppedFiles.length) {
-        alert(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
+        toast.warning(`${droppedFiles.length - validFiles.length} file(s) were skipped (invalid type).`);
       }
 
       // Add files to document queue
@@ -457,7 +463,7 @@ const PDFProcessor = () => {
         
         e.dataTransfer.clearData();
       } else {
-        alert("Please upload a CSV or PDF bank statement.");
+        toast.warning("Please upload a CSV or PDF bank statement.");
       }
     }
   };
@@ -471,7 +477,7 @@ const PDFProcessor = () => {
       );
 
       if (validFiles.length === 0) {
-        alert("Please select PDF or image files only.");
+        toast.warning("Please select PDF or image files only.");
         return;
       }
 
@@ -496,13 +502,13 @@ const PDFProcessor = () => {
   const handleReconcile = async (e) => {
     e.preventDefault();
     if (!bankFile) {
-      alert("Please select a bank statement file.");
+      toast.warning("Please select a bank statement file.");
       return;
     }
 
     const completedDocs = documents.filter(d => d.status === 'completed' && d.parsedData);
     if (completedDocs.length === 0) {
-      alert("Please process at least one document before reconciling.");
+      toast.warning("Please process at least one document before reconciling.");
       return;
     }
 
@@ -559,7 +565,7 @@ const PDFProcessor = () => {
 
     } catch (error) {
       console.error("Reconciliation error:", error);
-      alert("Reconciliation error: " + error.message);
+      toast.error(`Reconciliation failed: ${error.message}`);
     } finally {
       setReconciliationLoading(false);
     }
@@ -608,11 +614,11 @@ const PDFProcessor = () => {
           };
         });
 
-        alert("Match accepted successfully!");
+        toast.success("Match accepted successfully!");
       }
     } catch (error) {
       console.error("Error accepting match:", error);
-      alert("Failed to accept match: " + error.message);
+      toast.error(`Failed to accept match: ${error.message}`);
     }
   };
 
@@ -638,12 +644,12 @@ const PDFProcessor = () => {
 
       if (data.success) {
         // Refresh reconciliation - re-run the reconciliation
-        alert("Manual match created successfully! Refreshing reconciliation...");
+        toast.success("Manual match created successfully!");
         // You might want to re-trigger reconciliation here
       }
     } catch (error) {
       console.error("Error creating manual match:", error);
-      alert("Failed to create manual match: " + error.message);
+      toast.error(`Failed to create manual match: ${error.message}`);
     }
   };
 
@@ -692,12 +698,12 @@ const PDFProcessor = () => {
   // Handle batch categorize button click
   const handleBatchCategorize = async () => {
     if (!token) {
-      alert("Please log in to use batch categorization.");
+      toast.warning("Please log in to use batch categorization.");
       return;
     }
 
     if (!bankFile) {
-      alert("Please select a bank statement file first.");
+      toast.warning("Please select a bank statement file first.");
       return;
     }
 
@@ -715,10 +721,11 @@ const PDFProcessor = () => {
         setShowBatchProgress(true);
         setBatchCategorizationComplete(false);
         setMessage("Starting batch categorization...");
+        toast.info("Starting batch categorization...");
       }
     } catch (error) {
       setMessage(`Error: ${error.message}`);
-      alert("Failed to start batch categorization: " + error.message);
+      toast.error(`Failed to start batch categorization: ${error.message}`);
     }
   };
 
@@ -726,6 +733,7 @@ const PDFProcessor = () => {
   const handleBatchComplete = (data) => {
     setBatchCategorizationComplete(true);
     setMessage(`Batch categorization complete! ${data.processed || 0} transactions processed.`);
+    toast.success(`Batch categorization complete! ${data.processed || 0} transactions processed.`);
 
     // Optionally refresh the page or update state to show results
     if (data.results) {

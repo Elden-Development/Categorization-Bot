@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import './ReviewQueue.css';
 import { useAuth } from './AuthContext';
+import { useToast } from './ToastContext';
 
 const ReviewQueue = () => {
   const { token } = useAuth();
+  const toast = useToast();
   const [queueItems, setQueueItems] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -96,20 +98,20 @@ const ReviewQueue = () => {
         setQueueItems(prev => prev.filter(i => i.id !== item.id));
         setSelectedItem(null);
         fetchStats(); // Refresh stats
-        alert('Categorization approved!');
+        toast.success('Categorization approved!');
       } else {
-        alert('Failed to approve categorization');
+        toast.error('Failed to approve categorization');
       }
     } catch (error) {
       console.error('Error approving:', error);
-      alert('Error approving categorization');
+      toast.error(`Error approving categorization: ${error.message}`);
     }
   };
 
   // Handle correction submission
   const handleCorrect = async (item) => {
     if (!correctionData.category || !correctionData.subcategory) {
-      alert('Please fill in category and subcategory');
+      toast.warning('Please fill in category and subcategory');
       return;
     }
 
@@ -137,13 +139,13 @@ const ReviewQueue = () => {
         setCorrectionMode(false);
         setCorrectionData({ category: '', subcategory: '', ledgerType: '', notes: '' });
         fetchStats();
-        alert('Correction submitted! System will learn from this.');
+        toast.success('Correction submitted! System will learn from this.');
       } else {
-        alert('Failed to submit correction');
+        toast.error('Failed to submit correction');
       }
     } catch (error) {
       console.error('Error submitting correction:', error);
-      alert('Error submitting correction');
+      toast.error(`Error submitting correction: ${error.message}`);
     }
   };
 

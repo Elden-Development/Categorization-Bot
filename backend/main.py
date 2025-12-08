@@ -1,6 +1,7 @@
 import io
 import asyncio
 import json
+import random
 from fastapi import FastAPI, UploadFile, File, Body, Form, Depends, HTTPException, status, Request, Query, BackgroundTasks
 import uuid
 import threading
@@ -14,10 +15,9 @@ import os
 from typing import Optional, List, Literal
 from datetime import datetime, date
 from enum import Enum
-# Rate limiting temporarily disabled - will be re-implemented with a different library
-# from slowapi import Limiter, _rate_limit_exceeded_handler
-# from slowapi.util import get_remote_address
-# from slowapi.errors import RateLimitExceeded
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from google import genai
 from google.genai import types
 from PyPDF2 import PdfReader, PdfWriter  # Install via pip install PyPDF2
@@ -34,6 +34,40 @@ from database import get_db, init_db, test_connection
 from auth import get_current_user, get_optional_user, authenticate_user, create_access_token, hash_password
 import crud
 import models
+
+# Pydantic schemas (request/response models)
+from schemas import (
+    DocumentSchema,
+    ExportFilter,
+    UserCreate,
+    UserResponse,
+    Token,
+    UserSettings,
+    UserSettingsResponse,
+    VendorResearchRequest,
+    EnhancedResearchRequest,
+    FinancialCategorizationRequest,
+    SmartCategorizationRequest,
+    HybridCategorizationRequest,
+    StoreCategorizationRequest,
+    SubmitCorrectionRequest,
+    ReconciliationRequest,
+    ManualMatchRequest,
+    DocumentResponse,
+    TransactionResponse,
+    TransactionSearchRequest,
+    LowConfidenceTransaction,
+    ApproveCategorizationRequest,
+    ApproveBankTransactionRequest,
+    BulkApproveBankTransactionsRequest,
+    BulkApproveRequest,
+    BulkApproveResponse,
+    BatchCategorizationRequest,
+    BatchCategorizationResponse,
+    AsyncBatchRequest,
+    AsyncBatchResponse,
+    JobStatusResponse,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -58,15 +92,15 @@ def safe_get(data, *keys, default=None):
 
 
 # Retry helper for API calls with rate limiting
-async def retry_with_backoff(func, max_retries=3, initial_delay=2):
+async def retry_with_backoff(func, max_retries=5, initial_delay=3):
     """
-    Retry an async function with exponential backoff.
+    Retry an async function with exponential backoff and jitter.
     Specifically handles 429 RESOURCE_EXHAUSTED errors from Gemini API.
 
     Args:
         func: Async function to call (should be a coroutine or awaitable)
-        max_retries: Maximum number of retry attempts
-        initial_delay: Initial delay in seconds (doubles each retry)
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay in seconds (default: 3, doubles each retry with jitter)
 
     Returns:
         The result of the function call
@@ -92,8 +126,11 @@ async def retry_with_backoff(func, max_retries=3, initial_delay=2):
             is_rate_limit = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
 
             if is_rate_limit and attempt < max_retries:
-                print(f"Rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
-                await asyncio.sleep(delay)
+                # Add jitter (0-50% of delay) to prevent thundering herd
+                jitter = random.uniform(0, delay * 0.5)
+                actual_delay = delay + jitter
+                print(f"Rate limit hit, retrying in {actual_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(actual_delay)
                 delay *= 2  # Exponential backoff
             else:
                 # Not a rate limit error or out of retries
@@ -387,11 +424,11 @@ batch_job_tracker = BatchJobTracker()
 
 app = FastAPI(title="Categorization Bot API", version="1.0.0")
 
-# Initialize rate limiter - TEMPORARILY DISABLED due to conflicts with Pydantic request models
-# TODO: Re-implement rate limiting with a different approach that doesn't conflict with Pydantic
-# limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour", "50/minute"])
-# app.state.limiter = limiter
-# app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Initialize rate limiter
+# Key function extracts client IP for rate limit tracking
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Enable CORS - configured via environment variable for security
 # Default to localhost for development. In production, set CORS_ORIGINS in .env
@@ -440,6 +477,10 @@ async def startup_event():
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Semaphore to limit concurrent Gemini API calls (prevents rate limiting)
+# Gemini has strict rate limits - limit to 2 concurrent calls with delays between batches
+GEMINI_SEMAPHORE = asyncio.Semaphore(2)
 
 
 # =============================================================================
@@ -533,16 +574,6 @@ def get_ml_categorization_engine():
             gemini_api_key=GEMINI_API_KEY
         )
     return ml_engine
-
-# Schema validation
-class DocumentSchema(str, Enum):
-    """Valid document schema types"""
-    GENERIC = "generic"
-    FORM_1040 = "1040"
-    FORM_2848 = "2848"
-    FORM_8821 = "8821"
-    FORM_941 = "941"
-    PAYROLL = "payroll"
 
 # File validation configuration
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
@@ -1007,6 +1038,7 @@ async def process_page(page, schema="generic"):
     """
     Process a single PDF page and extract structured data.
     Includes retry logic for rate limits and proper error handling.
+    Uses semaphore to limit concurrent Gemini API calls.
     """
     # Write the individual page to a BytesIO stream.
     pdf_writer = PdfWriter()
@@ -1025,19 +1057,21 @@ async def process_page(page, schema="generic"):
     )
 
     # Step 1: Extract raw text from the page (with retry for rate limits)
+    # Uses semaphore to limit concurrent API calls
     async def extract_raw_text():
-        return await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=[RAW_PROMPT, file_part],
-            config={
-                "max_output_tokens": 40000,
-                "response_mime_type": "text/plain"
-            }
-        )
+        async with GEMINI_SEMAPHORE:
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=[RAW_PROMPT, file_part],
+                config={
+                    "max_output_tokens": 40000,
+                    "response_mime_type": "text/plain"
+                }
+            )
 
     try:
-        raw_response = await retry_with_backoff(extract_raw_text, max_retries=3, initial_delay=2)
+        raw_response = await retry_with_backoff(extract_raw_text)
     except Exception as e:
         print(f"Error extracting raw text from PDF page: {str(e)}")
         # Return error JSON that merge_page_results can handle
@@ -1054,19 +1088,21 @@ async def process_page(page, schema="generic"):
     # Step 2: Convert the raw text into structured JSON using the schema-specific prompt
     json_prompt = generate_schema_prompt(schema, raw_text)
 
+    # Uses semaphore to limit concurrent API calls
     async def convert_to_json():
-        return await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=[json_prompt],
-            config={
-                "max_output_tokens": 40000,
-                "response_mime_type": "application/json"
-            }
-        )
+        async with GEMINI_SEMAPHORE:
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash",
+                contents=[json_prompt],
+                config={
+                    "max_output_tokens": 40000,
+                    "response_mime_type": "application/json"
+                }
+            )
 
     try:
-        json_response = await retry_with_backoff(convert_to_json, max_retries=3, initial_delay=2)
+        json_response = await retry_with_backoff(convert_to_json)
     except Exception as e:
         print(f"Error converting to JSON: {str(e)}")
         return json.dumps({"error": f"Failed to structure data: {get_user_friendly_error(e)}"})
@@ -1188,7 +1224,9 @@ def merge_page_results(page_results):
     return merged
 
 @app.post("/process-pdf")
+@limiter.limit("10/minute")
 async def process_file(
+    request: Request,
     file: UploadFile = File(...),
     schema: str = Form("generic"),
     current_user: models.User = Depends(get_optional_user),
@@ -1198,6 +1236,8 @@ async def process_file(
     Process a document (PDF or image) and extract structured data.
 
     If user is authenticated, document will be saved to database for history.
+
+    Rate limited to 10 requests per minute (expensive processing).
     """
     # Validate schema parameter
     valid_schemas = [s.value for s in DocumentSchema]
@@ -1288,16 +1328,22 @@ async def process_file(
                 data=file_content,
                 mime_type=file.content_type
             )
-            raw_response = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=[RAW_PROMPT, file_part],
-                config={
-                    "max_output_tokens": 40000,
-                    "response_mime_type": "text/plain"
-                }
-            )
-            raw_text = raw_response.text
+
+            # Extract raw text with semaphore and retry logic
+            async def extract_image_text():
+                async with GEMINI_SEMAPHORE:
+                    return await asyncio.to_thread(
+                        client.models.generate_content,
+                        model="gemini-2.0-flash",
+                        contents=[RAW_PROMPT, file_part],
+                        config={
+                            "max_output_tokens": 40000,
+                            "response_mime_type": "text/plain"
+                        }
+                    )
+
+            raw_response = await retry_with_backoff(extract_image_text)
+            raw_text = raw_response.text if raw_response else ""
 
             # Check if raw text extraction failed
             if not raw_text or raw_text.strip() == "":
@@ -1318,15 +1364,20 @@ async def process_file(
             # Use schema-specific prompt template
             json_prompt = generate_schema_prompt(schema, raw_text)
 
-            json_response = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=[json_prompt],
-                config={
-                    "max_output_tokens": 40000,
-                    "response_mime_type": "application/json"
-                }
-            )
+            # Convert to JSON with semaphore and retry logic
+            async def convert_image_to_json():
+                async with GEMINI_SEMAPHORE:
+                    return await asyncio.to_thread(
+                        client.models.generate_content,
+                        model="gemini-2.0-flash",
+                        contents=[json_prompt],
+                        config={
+                            "max_output_tokens": 40000,
+                            "response_mime_type": "application/json"
+                        }
+                    )
+
+            json_response = await retry_with_backoff(convert_image_to_json)
 
             # Validate Gemini response
             if not json_response or not json_response.text or json_response.text.strip() == "":
@@ -1499,20 +1550,11 @@ async def process_file(
 
         return {"error": "Request failed", "detail": str(e)}
 
-# Define request model for vendor research
-class VendorResearchRequest(BaseModel):
-    vendor_name: str = Field(..., min_length=1, max_length=500, description="Vendor name to research")
-
-    @field_validator('vendor_name')
-    @classmethod
-    def validate_vendor_name(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Vendor name cannot be empty or whitespace")
-        return v.strip()
-
 @app.post("/research-vendor")
+@limiter.limit("20/minute")
 async def research_vendor(
-    request: VendorResearchRequest,
+    request: Request,
+    vendor_request: VendorResearchRequest,
     current_user: models.User = Depends(get_optional_user),
     db: Session = Depends(get_db)
 ):
@@ -1520,8 +1562,10 @@ async def research_vendor(
     Research a vendor using Google Search.
 
     Results are cached in database if user is authenticated to avoid redundant API calls.
+
+    Rate limited to 20 requests per minute (expensive API call).
     """
-    vendor_name = request.vendor_name
+    vendor_name = vendor_request.vendor_name
 
     if not vendor_name:
         return {"error": "No vendor name provided"}
@@ -1614,22 +1658,10 @@ async def research_vendor(
         friendly_error = get_user_friendly_error(e)
         return {"error": friendly_error}
 
-# Enhanced vendor research for ambiguous cases
-class EnhancedResearchRequest(BaseModel):
-    vendor_name: str = Field(..., min_length=1, max_length=500, description="Vendor name to research")
-    transaction_context: dict = Field(..., description="Additional context about the transaction")
-    confidence_threshold: int = Field(70, ge=0, le=100, description="Minimum confidence to skip research (0-100)")
-
-    @field_validator('vendor_name')
-    @classmethod
-    def validate_vendor_name(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Vendor name cannot be empty or whitespace")
-        return v.strip()
-
-
 @app.post("/research-vendor-enhanced")
+@limiter.limit("10/minute")
 async def research_vendor_enhanced(
+    request: Request,
     body: EnhancedResearchRequest,
     current_user: models.User = Depends(get_optional_user),
     db: Session = Depends(get_db)
@@ -1645,6 +1677,8 @@ async def research_vendor_enhanced(
     5. Red flag detection
 
     Results cached in database if user is authenticated.
+
+    Rate limited to 10 requests per minute (very expensive API call).
     """
     vendor_name = body.vendor_name
 
@@ -1793,25 +1827,18 @@ async def research_vendor_enhanced(
         return {"error": friendly_error}
 
 
-# Define request model for financial categorization
-class FinancialCategorizationRequest(BaseModel):
-    vendor_info: str = Field(..., min_length=1, max_length=500, description="Vendor information")
-    document_data: dict = Field(..., description="Transaction document data")
-    transaction_purpose: str = Field("", max_length=1000, description="Transaction purpose")
-
-    @field_validator('vendor_info')
-    @classmethod
-    def validate_vendor_info(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Vendor info cannot be empty or whitespace")
-        return v.strip()
-
 @app.post("/categorize-transaction")
-async def categorize_transaction(request: FinancialCategorizationRequest):
-    vendor_info = request.vendor_info
-    document_data = request.document_data
-    transaction_purpose = request.transaction_purpose
-    
+@limiter.limit("30/minute")
+async def categorize_transaction(request: Request, categorization_request: FinancialCategorizationRequest):
+    """
+    Categorize a financial transaction using Gemini AI.
+
+    Rate limited to 30 requests per minute.
+    """
+    vendor_info = categorization_request.vendor_info
+    document_data = categorization_request.document_data
+    transaction_purpose = categorization_request.transaction_purpose
+
     if not vendor_info or not document_data:
         return {"error": "Missing required information"}
     
@@ -1950,24 +1977,10 @@ async def categorize_transaction(request: FinancialCategorizationRequest):
         print(f"Error categorizing transaction: {str(e)}")
         return {"error": f"Error categorizing transaction: {str(e)}"}
 
-# Smart categorization with automatic ambiguity resolution
-class SmartCategorizationRequest(BaseModel):
-    vendor_name: str = Field(..., min_length=1, max_length=500, description="Vendor name")
-    document_data: dict = Field(..., description="Transaction document data")
-    transaction_purpose: str = Field("", max_length=1000, description="Transaction purpose")
-    confidence_threshold: int = Field(70, ge=0, le=100, description="Confidence threshold (0-100)")
-    auto_research: bool = Field(True, description="Auto-trigger research on low confidence")
-
-    @field_validator('vendor_name')
-    @classmethod
-    def validate_vendor_name(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Vendor name cannot be empty or whitespace")
-        return v.strip()
-
-
 @app.post("/categorize-transaction-smart")
+@limiter.limit("20/minute")
 async def categorize_transaction_smart(
+    request: Request,
     body: SmartCategorizationRequest,
     current_user: models.User = Depends(get_optional_user),
     db: Session = Depends(get_db)
@@ -1984,6 +1997,8 @@ async def categorize_transaction_smart(
     6. Return comprehensive results with all confidence metrics
 
     This endpoint provides the most intelligent categorization with built-in ambiguity handling.
+
+    Rate limited to 20 requests per minute (may trigger multiple API calls).
     """
     vendor_name = body.vendor_name
     document_data = body.document_data
@@ -2233,16 +2248,19 @@ class HybridCategorizationRequest(BaseModel):
     transaction_purpose: str = ""
 
 @app.post("/categorize-transaction-hybrid")
-async def categorize_transaction_hybrid(request: HybridCategorizationRequest):
+@limiter.limit("20/minute")
+async def categorize_transaction_hybrid(request: Request, hybrid_request: HybridCategorizationRequest):
     """
     Hybrid categorization endpoint that provides BOTH ML prediction and Gemini AI categorization.
 
     This allows users to compare both approaches and choose the best one, while also
     enabling the system to learn from their choices.
+
+    Rate limited to 20 requests per minute (runs multiple AI models).
     """
-    vendor_info = request.vendor_info
-    document_data = request.document_data
-    transaction_purpose = request.transaction_purpose
+    vendor_info = hybrid_request.vendor_info
+    document_data = hybrid_request.document_data
+    transaction_purpose = hybrid_request.transaction_purpose
 
     if not vendor_info or not document_data:
         return {"error": "Missing required information"}
@@ -3061,7 +3079,9 @@ async def list_bank_statements(
 
 
 @app.post("/parse-bank-statement")
+@limiter.limit("10/minute")
 async def parse_bank_statement(
+    request: Request,
     file: UploadFile = File(...),
     current_user: models.User = Depends(get_optional_user),
     db: Session = Depends(get_db)
@@ -3071,6 +3091,8 @@ async def parse_bank_statement(
 
     Returns list of transactions with date, description, and amount.
     If user is authenticated, saves to database for reconciliation history.
+
+    Rate limited to 10 requests per minute.
     """
     # Validate file upload
     await validate_file_upload(file)
@@ -3318,13 +3340,16 @@ class Token(BaseModel):
 
 
 @app.post("/register", response_model=UserResponse, tags=["Authentication"])
-async def register(user_data: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit("3/minute")
+async def register(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
     """
     Register a new user
 
     - **username**: Unique username
     - **email**: Unique email address
     - **password**: Password (will be hashed)
+
+    Rate limited to 3 requests per minute to prevent spam account creation.
     """
     # Check if username exists
     existing_user = crud.get_user_by_username(db, user_data.username)
@@ -3364,14 +3389,18 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/login", response_model=Token, tags=["Authentication"])
+@limiter.limit("5/minute")
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     """
     Login with username and password
 
-    Returns JWT access token for authentication
+    Returns JWT access token for authentication.
+
+    Rate limited to 5 requests per minute to prevent brute force attacks.
     """
     user = authenticate_user(form_data.username, form_data.password, db)
 
@@ -3975,11 +4004,15 @@ async def bulk_approve_bank_transaction_categorizations(
                 )
             bank_txs = crud.get_bank_transactions_by_statement(db, current_user.id, request.bank_statement_id)
 
+        # Pre-fetch all categorizations in a single query (N+1 optimization)
+        transaction_ids = [tx.id for tx in bank_txs]
+        categorizations_map = crud.get_categorizations_for_bank_transactions(
+            db, current_user.id, transaction_ids
+        )
+
         for bank_tx in bank_txs:
-            # Get categorization
-            categorization = crud.get_categorization_for_bank_transaction(
-                db, current_user.id, bank_tx.id
-            )
+            # Get categorization (lookup from pre-fetched dict)
+            categorization = categorizations_map.get(bank_tx.id)
 
             if not categorization:
                 skipped_info.append({"id": bank_tx.id, "reason": "No categorization"})
@@ -4573,8 +4606,10 @@ class BatchCategorizationResponse(BaseModel):
 
 
 @app.post("/categorize-bank-statement", response_model=BatchCategorizationResponse)
+@limiter.limit("5/minute")
 async def categorize_bank_statement(
-    request: BatchCategorizationRequest,
+    request: Request,
+    batch_request: BatchCategorizationRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -4589,34 +4624,36 @@ async def categorize_bank_statement(
 
     Transactions with confidence >= threshold are marked as auto-approved.
     Low-confidence transactions are flagged for manual review.
+
+    Rate limited to 5 requests per minute (very expensive batch operation).
     """
     # Verify the bank statement exists and belongs to the user
-    statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+    statement = crud.get_bank_statement_by_id(db, current_user.id, batch_request.bank_statement_id)
     if not statement:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Bank statement with ID {request.bank_statement_id} not found"
+            detail=f"Bank statement with ID {batch_request.bank_statement_id} not found"
         )
 
     # Get user settings and resolve threshold/options
     user_settings = current_user.settings or {}
-    confidence_threshold = request.confidence_threshold
+    confidence_threshold = batch_request.confidence_threshold
     if confidence_threshold is None:
         confidence_threshold = user_settings.get("confidence_threshold", DEFAULT_USER_SETTINGS["confidence_threshold"])
 
-    use_vendor_mapping = request.use_vendor_mapping
+    use_vendor_mapping = batch_request.use_vendor_mapping
     if use_vendor_mapping is None:
         use_vendor_mapping = user_settings.get("auto_approve_vendor_mapping", DEFAULT_USER_SETTINGS["auto_approve_vendor_mapping"])
 
     # Get all transactions for this statement
     bank_transactions = crud.get_bank_transactions_by_statement(
-        db, current_user.id, request.bank_statement_id
+        db, current_user.id, batch_request.bank_statement_id
     )
 
     if not bank_transactions:
         return BatchCategorizationResponse(
             success=True,
-            statement_id=request.bank_statement_id,
+            statement_id=batch_request.bank_statement_id,
             total_transactions=0,
             processed=0,
             failed=0,
@@ -4633,13 +4670,18 @@ async def categorize_bank_statement(
     low_confidence = 0
     category_counts = {}
 
+    # Pre-fetch all existing categorizations in a single query (N+1 optimization)
+    # This replaces N individual queries with 1 batch query
+    transaction_ids = [tx.id for tx in bank_transactions]
+    existing_categorizations = crud.get_categorizations_for_bank_transactions(
+        db, current_user.id, transaction_ids
+    )
+
     # Process each transaction
     for bank_tx in bank_transactions:
         try:
-            # Check if already categorized
-            existing_cat = crud.get_categorization_for_bank_transaction(
-                db, current_user.id, bank_tx.id
-            )
+            # Check if already categorized (lookup from pre-fetched dict)
+            existing_cat = existing_categorizations.get(bank_tx.id)
             if existing_cat:
                 # Already categorized, include in results but skip processing
                 results.append({
@@ -4828,7 +4870,7 @@ async def categorize_bank_statement(
         user_id=current_user.id,
         action="batch_categorization",
         entity_type="bank_statement",
-        entity_id=request.bank_statement_id,
+        entity_id=batch_request.bank_statement_id,
         details={
             "total": len(bank_transactions),
             "processed": processed,
@@ -4840,7 +4882,7 @@ async def categorize_bank_statement(
 
     return BatchCategorizationResponse(
         success=True,
-        statement_id=request.bank_statement_id,
+        statement_id=batch_request.bank_statement_id,
         total_transactions=len(bank_transactions),
         processed=processed,
         failed=failed,
@@ -4944,6 +4986,13 @@ def process_batch_categorization_job(
         BATCH_SIZE = 10  # Pause after every N Gemini API calls
         BATCH_PAUSE = 2.0  # Longer pause between batches
 
+        # Pre-fetch all existing categorizations in a single query (N+1 optimization)
+        transaction_ids = [tx.id for tx in bank_transactions]
+        existing_categorizations = crud.get_categorizations_for_bank_transactions(
+            db, user_id, transaction_ids
+        )
+        print(f"[BATCH] Pre-fetched {len(existing_categorizations)} existing categorizations")
+
         for bank_tx in bank_transactions:
             try:
                 # Update progress
@@ -4952,10 +5001,8 @@ def process_batch_categorization_job(
                     high_confidence, low_confidence, failed
                 )
 
-                # Check if already categorized
-                existing_cat = crud.get_categorization_for_bank_transaction(
-                    db, user_id, bank_tx.id
-                )
+                # Check if already categorized (lookup from pre-fetched dict)
+                existing_cat = existing_categorizations.get(bank_tx.id)
 
                 if existing_cat:
                     result = {
@@ -5166,8 +5213,10 @@ def process_batch_categorization_job(
 
 
 @app.post("/categorize-bank-statement/async", response_model=AsyncBatchResponse, tags=["Batch Processing"])
+@limiter.limit("5/minute")
 async def start_async_batch_categorization(
-    request: AsyncBatchRequest,
+    request: Request,
+    async_request: AsyncBatchRequest,
     background_tasks: BackgroundTasks,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -5179,18 +5228,20 @@ async def start_async_batch_categorization(
     Use GET /batch-job/{job_id} to check status and get results.
 
     This is ideal for large statements where you want to show a progress bar.
+
+    Rate limited to 5 requests per minute (very expensive batch operation).
     """
     # Verify the bank statement exists
-    statement = crud.get_bank_statement_by_id(db, current_user.id, request.bank_statement_id)
+    statement = crud.get_bank_statement_by_id(db, current_user.id, async_request.bank_statement_id)
     if not statement:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Bank statement with ID {request.bank_statement_id} not found"
+            detail=f"Bank statement with ID {async_request.bank_statement_id} not found"
         )
 
     # Get transactions
     bank_transactions = crud.get_bank_transactions_by_statement(
-        db, current_user.id, request.bank_statement_id
+        db, current_user.id, async_request.bank_statement_id
     )
 
     if not bank_transactions:
@@ -5201,18 +5252,18 @@ async def start_async_batch_categorization(
 
     # Resolve settings
     user_settings = current_user.settings or {}
-    confidence_threshold = request.confidence_threshold
+    confidence_threshold = async_request.confidence_threshold
     if confidence_threshold is None:
         confidence_threshold = user_settings.get("confidence_threshold", DEFAULT_USER_SETTINGS["confidence_threshold"])
 
-    use_vendor_mapping = request.use_vendor_mapping
+    use_vendor_mapping = async_request.use_vendor_mapping
     if use_vendor_mapping is None:
         use_vendor_mapping = user_settings.get("auto_approve_vendor_mapping", DEFAULT_USER_SETTINGS["auto_approve_vendor_mapping"])
 
     # Create job
     job_id = batch_job_tracker.create_job(
         user_id=current_user.id,
-        statement_id=request.bank_statement_id,
+        statement_id=async_request.bank_statement_id,
         total_transactions=len(bank_transactions)
     )
 
@@ -5225,7 +5276,7 @@ async def start_async_batch_categorization(
         process_batch_categorization_job,
         job_id=job_id,
         user_id=current_user.id,
-        statement_id=request.bank_statement_id,
+        statement_id=async_request.bank_statement_id,
         confidence_threshold=confidence_threshold,
         use_vendor_mapping=use_vendor_mapping,
         total_transactions=len(bank_transactions),

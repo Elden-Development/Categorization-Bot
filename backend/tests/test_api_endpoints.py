@@ -118,17 +118,18 @@ class TestInputValidation:
         assert response.status_code in [200, 400, 422]
 
     def test_categorization_with_list_document_data(self, client):
-        """Test categorization when document_data is a list (edge case we fixed)."""
+        """Test categorization rejects list when dict is required for document_data."""
         response = client.post(
             "/categorize-transaction-hybrid",
             json={
                 "vendor_info": "Test Vendor",
-                "document_data": [{"test": "data"}],  # List instead of dict
+                "document_data": [{"test": "data"}],  # List instead of dict - should be rejected
                 "transaction_purpose": "Test"
             }
         )
-        assert response.status_code == 200
+        # Pydantic validation should reject this with 422 Unprocessable Entity
+        assert response.status_code == 422
 
         data = response.json()
-        # Should handle gracefully (either process first item or return error)
-        assert "error" in data or "geminiCategorization" in data
+        # Should have validation error details
+        assert "detail" in data

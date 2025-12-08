@@ -425,6 +425,40 @@ def get_categorization_for_bank_transaction(
     ).first()
 
 
+def get_categorizations_for_bank_transactions(
+    db: Session,
+    user_id: int,
+    bank_transaction_ids: List[int]
+) -> Dict[int, models.Categorization]:
+    """
+    Batch fetch categorizations for multiple bank transactions.
+
+    This is optimized to avoid N+1 query problems - instead of making
+    one query per transaction, we make a single query for all transactions.
+
+    Args:
+        db: Database session
+        user_id: User ID
+        bank_transaction_ids: List of bank transaction IDs to fetch
+
+    Returns:
+        Dictionary mapping bank_transaction_id -> Categorization object
+        Transactions without categorizations will not be in the dict.
+    """
+    if not bank_transaction_ids:
+        return {}
+
+    categorizations = db.query(models.Categorization).filter(
+        and_(
+            models.Categorization.user_id == user_id,
+            models.Categorization.bank_transaction_id.in_(bank_transaction_ids)
+        )
+    ).all()
+
+    # Build lookup dictionary
+    return {cat.bank_transaction_id: cat for cat in categorizations}
+
+
 def update_bank_transaction_category(
     db: Session,
     bank_transaction_id: int,

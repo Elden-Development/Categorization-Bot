@@ -13,12 +13,72 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models
 import os
+import secrets
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Environment detection
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+IS_PRODUCTION = ENVIRONMENT in ("production", "prod")
+
+# Insecure default keys that should never be used in production
+INSECURE_DEFAULTS = {
+    "your-secret-key-change-this-in-production",
+    "change-this-in-production",
+    "secret",
+    "secret-key",
+    "your-secret-key",
+    "changeme",
+    "changethis",
+}
+
+
+def _get_secret_key() -> str:
+    """
+    Get and validate the SECRET_KEY for JWT signing.
+
+    In production: Fails loudly if SECRET_KEY is not set or is insecure.
+    In development: Uses a generated key with a warning if not configured.
+    """
+    secret_key = os.getenv("SECRET_KEY", "").strip()
+
+    # Check if secret key is missing or insecure
+    is_missing = not secret_key
+    is_insecure = secret_key.lower() in INSECURE_DEFAULTS or len(secret_key) < 32
+
+    if IS_PRODUCTION:
+        if is_missing:
+            raise RuntimeError(
+                "FATAL: SECRET_KEY environment variable is not set. "
+                "This is required in production. Generate one with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        if is_insecure:
+            raise RuntimeError(
+                "FATAL: SECRET_KEY is insecure (too short or using a default value). "
+                "Generate a secure key with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+    else:
+        # Development mode
+        if is_missing or is_insecure:
+            # Generate a temporary key for development
+            generated_key = secrets.token_urlsafe(64)
+            print("\n" + "=" * 70)
+            print("⚠️  WARNING: SECRET_KEY not configured or insecure!")
+            print("   Using a temporary generated key for this session.")
+            print("   Sessions will NOT persist across restarts.")
+            print("\n   To fix, add to your .env file:")
+            print(f'   SECRET_KEY="{secrets.token_urlsafe(64)}"')
+            print("=" * 70 + "\n")
+            return generated_key
+
+    return secret_key
+
+
 # JWT settings
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+SECRET_KEY = _get_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
