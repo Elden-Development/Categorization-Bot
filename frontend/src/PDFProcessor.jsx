@@ -33,6 +33,7 @@ const PDFProcessor = () => {
   const [bankStatementId, setBankStatementId] = useState(null);
   const [showBatchProgress, setShowBatchProgress] = useState(false);
   const [batchCategorizationComplete, setBatchCategorizationComplete] = useState(false);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   // UI state
   const [dragActive, setDragActive] = useState(false);
@@ -716,6 +717,17 @@ const PDFProcessor = () => {
         throw new Error("No statement ID returned. Please ensure you are logged in.");
       }
 
+      // Check if any transactions were extracted
+      if (data.count === 0) {
+        throw new Error(
+          "No transactions could be extracted from this file. " +
+          "The AI service may be busy - please wait 30 seconds and try again."
+        );
+      }
+
+      // Show success message with transaction count
+      toast.success(`Extracted ${data.count} transactions from bank statement`);
+
       return data.statement_id;
     } catch (error) {
       console.error("Error uploading bank statement:", error);
@@ -735,8 +747,10 @@ const PDFProcessor = () => {
       return;
     }
 
+    setBatchLoading(true);
     try {
-      setMessage("Uploading bank statement...");
+      setMessage("Uploading and parsing bank statement...");
+      toast.info("Uploading bank statement - this may take a moment...");
 
       // Upload bank statement to database if not already uploaded
       let statementId = bankStatementId;
@@ -749,11 +763,12 @@ const PDFProcessor = () => {
         setShowBatchProgress(true);
         setBatchCategorizationComplete(false);
         setMessage("Starting batch categorization...");
-        toast.info("Starting batch categorization...");
       }
     } catch (error) {
       setMessage(`Error: ${error.message}`);
-      toast.error(`Failed to start batch categorization: ${error.message}`);
+      toast.error(`Failed: ${error.message}`);
+    } finally {
+      setBatchLoading(false);
     }
   };
 
@@ -1051,11 +1066,24 @@ const PDFProcessor = () => {
                 className="btn"
                 style={{ marginTop: '0.75rem', backgroundColor: '#7c3aed' }}
                 onClick={handleBatchCategorize}
+                disabled={batchLoading}
               >
-                <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                </svg>
-                Batch Categorize All Transactions
+                {batchLoading ? (
+                  <>
+                    <svg className="btn-icon spinner-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" opacity="0.25" />
+                      <path d="M12 2a10 10 0 0 1 10 10" />
+                    </svg>
+                    Parsing Bank Statement...
+                  </>
+                ) : (
+                  <>
+                    <svg className="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                    </svg>
+                    Batch Categorize All Transactions
+                  </>
+                )}
               </button>
             )}
 
