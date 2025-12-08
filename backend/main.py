@@ -3250,34 +3250,52 @@ async def parse_bank_statement(
 
         # If basic parser returns no transactions for PDF, try Gemini AI as fallback
         gemini_error_message = None
+        gemini_tried = False
         if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
             print(f"Basic PDF parser found 0 transactions, trying Gemini AI as fallback...")
 
-            # First try direct PDF mode
-            try:
-                transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=False)
-                if len(transactions) > 0:
-                    parsing_method = "gemini_ai_pdf"
-                    print(f"Gemini AI (PDF mode) successfully extracted {len(transactions)} transactions")
-            except Exception as gemini_error:
-                error_str = str(gemini_error)
-                print(f"Gemini AI (PDF mode) failed: {error_str}")
-                gemini_error_message = get_user_friendly_error(gemini_error)
+            is_scanned = pdf_diagnostic and pdf_diagnostic.get("is_likely_scanned")
 
-            # If PDF mode failed and PDF looks scanned, try image mode
-            if len(transactions) == 0 and pdf_diagnostic and pdf_diagnostic.get("is_likely_scanned"):
-                print(f"PDF appears to be scanned, trying Gemini AI with image mode...")
+            # For scanned PDFs, skip PDF mode and go straight to image mode
+            if is_scanned:
+                print(f"PDF is scanned (0 text chars), using image mode directly...")
+                gemini_tried = True
                 try:
                     transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=True)
                     if len(transactions) > 0:
                         parsing_method = "gemini_ai_image"
                         print(f"Gemini AI (image mode) successfully extracted {len(transactions)} transactions")
-                        gemini_error_message = None  # Clear error since we succeeded
                 except Exception as img_gemini_error:
                     error_str = str(img_gemini_error)
-                    print(f"Gemini AI (image mode) also failed: {error_str}")
-                    if not gemini_error_message:
-                        gemini_error_message = get_user_friendly_error(img_gemini_error)
+                    print(f"Gemini AI (image mode) failed: {error_str}")
+                    gemini_error_message = get_user_friendly_error(img_gemini_error)
+            else:
+                # For text-based PDFs, try PDF mode first
+                gemini_tried = True
+                try:
+                    transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=False)
+                    if len(transactions) > 0:
+                        parsing_method = "gemini_ai_pdf"
+                        print(f"Gemini AI (PDF mode) successfully extracted {len(transactions)} transactions")
+                except Exception as gemini_error:
+                    error_str = str(gemini_error)
+                    print(f"Gemini AI (PDF mode) failed: {error_str}")
+                    gemini_error_message = get_user_friendly_error(gemini_error)
+
+                # If PDF mode returned 0 results, try image mode as last resort
+                if len(transactions) == 0:
+                    print(f"Gemini PDF mode returned 0 results, trying image mode...")
+                    try:
+                        transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=True)
+                        if len(transactions) > 0:
+                            parsing_method = "gemini_ai_image"
+                            print(f"Gemini AI (image mode) successfully extracted {len(transactions)} transactions")
+                            gemini_error_message = None  # Clear error since we succeeded
+                    except Exception as img_gemini_error:
+                        error_str = str(img_gemini_error)
+                        print(f"Gemini AI (image mode) also failed: {error_str}")
+                        if not gemini_error_message:
+                            gemini_error_message = get_user_friendly_error(img_gemini_error)
 
         # Save to database if user is authenticated
         db_statement = None
@@ -3341,7 +3359,10 @@ async def parse_bank_statement(
             # Add diagnostic info to help user understand the issue
             if pdf_diagnostic:
                 if pdf_diagnostic.get("is_likely_scanned"):
-                    error_msg = f"This PDF appears to be scanned/image-based ({pdf_diagnostic.get('text_extracted', 0)} chars extracted). Scanned PDFs require OCR which is not supported."
+                    if gemini_tried:
+                        error_msg = f"This PDF is scanned/image-based. AI vision extraction was attempted but found no transactions."
+                    else:
+                        error_msg = f"This PDF appears to be scanned/image-based ({pdf_diagnostic.get('text_extracted', 0)} chars extracted)."
                 elif pdf_diagnostic.get("text_extracted", 0) > 0:
                     error_msg = f"PDF has text ({pdf_diagnostic.get('text_extracted')} chars) but no transactions were recognized. The format may not be supported."
 
@@ -3353,8 +3374,9 @@ async def parse_bank_statement(
                 "transactions": [],
                 "count": 0,
                 "file_name": file.filename,
-                "retry_suggested": False,
-                "diagnostic": pdf_diagnostic
+                "retry_suggested": gemini_tried,  # Can retry if Gemini was rate-limited
+                "diagnostic": pdf_diagnostic,
+                "gemini_attempted": gemini_tried
             }
 
         return {
