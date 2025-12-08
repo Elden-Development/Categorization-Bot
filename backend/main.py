@@ -481,7 +481,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Semaphore to limit concurrent Gemini API calls (prevents rate limiting)
 # Gemini has strict rate limits - limit to 2 concurrent calls with delays between batches
-GEMINI_SEMAPHORE = asyncio.Semaphore(1)  # Only 1 concurrent call - Gemini has strict rate limits
+GEMINI_SEMAPHORE = asyncio.Semaphore(2)  # Allow 2 concurrent calls for reasonable speed
 
 
 # =============================================================================
@@ -1310,9 +1310,7 @@ async def process_file(
                 result = await process_page(page, schema)
                 page_results.append(result)
 
-                # Add small delay between pages to respect rate limits (except after last page)
-                if i < total_pages - 1:
-                    await asyncio.sleep(0.5)  # 0.5 second delay between pages
+                # Semaphore handles rate limiting, no additional delay needed
 
             # Merge the JSON results from each page.
             merged_result = merge_page_results(page_results)
@@ -1334,8 +1332,9 @@ async def process_file(
                         print(f"Warning: Failed to update document status: {db_err}")
                 raise HTTPException(status_code=422, detail=error_detail)
 
-            # Perform extraction verification on the complete document
-            final_result = await verify_extraction(merged_result)
+            # Skip verification step to speed up processing (saves 1 API call)
+            # Verification can be re-enabled later if needed
+            final_result = merged_result
 
             combined_response_text = json.dumps(final_result, indent=2)
         else:
