@@ -35,13 +35,20 @@ class BankStatementParser:
         """Initialize the parser."""
         self.supported_formats = ['csv', 'pdf']
         self.date_formats = [
-            '%m/%d/%Y',
-            '%Y-%m-%d',
-            '%m-%d-%Y',
-            '%d/%m/%Y',
-            '%Y/%m/%d',
-            '%m/%d/%y',
-            '%d-%m-%Y',
+            '%Y-%m-%d',      # 2025-09-06
+            '%d/%m/%Y',      # 12/01/2025
+            '%m/%d/%Y',      # 01/12/2025
+            '%d-%m-%Y',      # 12-01-2025
+            '%m-%d-%Y',      # 01-12-2025
+            '%Y/%m/%d',      # 2025/01/12
+            '%m/%d/%y',      # 01/12/25
+            '%d/%m/%y',      # 12/01/25
+            '%d %B %Y',      # 1 February 2025
+            '%d %b %Y',      # 1 Feb 2025
+            '%B %d, %Y',     # February 1, 2025
+            '%b %d, %Y',     # Feb 1, 2025
+            '%d %B',         # 1 February (no year)
+            '%d %b',         # 1 Feb (no year)
             '%b %d, %Y',
             '%B %d, %Y'
         ]
@@ -251,10 +258,27 @@ class BankStatementParser:
             return None
 
         date_str = str(date_str).strip()
+        current_year = datetime.now().year
 
         for fmt in self.date_formats:
             try:
                 dt = datetime.strptime(date_str, fmt)
+                # If year is 1900 (default when no year in format), use current year
+                if dt.year == 1900:
+                    dt = dt.replace(year=current_year)
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+
+        # Try adding current year for short date formats
+        for short_fmt, full_fmt in [
+            ('%m/%d', '%m/%d/%Y'),
+            ('%d/%m', '%d/%m/%Y'),
+            ('%m-%d', '%m-%d-%Y'),
+            ('%d-%m', '%d-%m-%Y'),
+        ]:
+            try:
+                dt = datetime.strptime(f"{date_str}/{current_year}", f"{short_fmt}/%Y")
                 return dt.strftime('%Y-%m-%d')
             except ValueError:
                 continue
@@ -364,25 +388,27 @@ class BankStatementParser:
         """
         Parse PDF using pdfplumber, returns transactions and text length.
         """
-        transactions = []
+        table_transactions = []
+        text_transactions = []
         total_text_length = 0
 
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
             print(f"[pdfplumber] PDF has {len(pdf.pages)} pages")
 
             for page_num, page in enumerate(pdf.pages):
-                # Try to extract tables first
+                # Try to extract tables
                 tables = page.extract_tables()
                 print(f"[pdfplumber] Page {page_num}: found {len(tables) if tables else 0} tables")
 
                 if tables:
                     for table_idx, table in enumerate(tables):
-                        print(f"[pdfplumber] Table {table_idx} has {len(table)} rows")
-                        if table and len(table) > 0:
-                            print(f"[pdfplumber] First row sample: {str(table[0])[:200]}")
-                        table_transactions = self._process_table(table, page_num)
-                        print(f"[pdfplumber] Extracted {len(table_transactions)} transactions from table {table_idx}")
-                        transactions.extend(table_transactions)
+                        if table and len(table) > 1:  # Need at least 2 rows
+                            print(f"[pdfplumber] Table {table_idx} has {len(table)} rows")
+                            if table[0]:
+                                print(f"[pdfplumber] First row sample: {str(table[0])[:200]}")
+                            page_table_txns = self._process_table(table, page_num)
+                            print(f"[pdfplumber] Extracted {len(page_table_txns)} transactions from table {table_idx}")
+                            table_transactions.extend(page_table_txns)
 
                 # Also try text extraction
                 text = page.extract_text()
@@ -392,17 +418,23 @@ class BankStatementParser:
                     if page_num == 0:
                         print(f"[pdfplumber] Page {page_num} text ({len(text)} chars): {text[:500].replace(chr(10), ' | ')}")
 
-                    text_transactions = self._extract_transactions_from_text(text)
-                    print(f"[pdfplumber] Extracted {len(text_transactions)} transactions from text on page {page_num}")
-                    # Only add text transactions if we didn't get any from tables
-                    if not tables or len(transactions) == 0:
-                        transactions.extend(text_transactions)
+                    page_text_txns = self._extract_transactions_from_text(text)
+                    print(f"[pdfplumber] Extracted {len(page_text_txns)} transactions from text on page {page_num}")
+                    text_transactions.extend(page_text_txns)
 
         print(f"[pdfplumber] Total text extracted: {total_text_length} characters")
+        print(f"[pdfplumber] Table transactions: {len(table_transactions)}, Text transactions: {len(text_transactions)}")
+
         if total_text_length < 100:
             print("[pdfplumber] WARNING: Very little text - PDF may be scanned/image-based")
 
-        return transactions, total_text_length
+        # Use whichever method found more transactions
+        if len(text_transactions) > len(table_transactions):
+            print(f"[pdfplumber] Using text extraction results ({len(text_transactions)} > {len(table_transactions)})")
+            return text_transactions, total_text_length
+        else:
+            print(f"[pdfplumber] Using table extraction results ({len(table_transactions)} >= {len(text_transactions)})")
+            return table_transactions, total_text_length
 
     def _process_table(self, table: List[List], page_num: int) -> List[Dict]:
         """
@@ -417,49 +449,69 @@ class BankStatementParser:
         """
         transactions = []
 
-        if not table or len(table) < 2:
+        if not table or len(table) < 1:
             return transactions
+
+        print(f"[table_process] Processing table with {len(table)} rows, {len(table[0]) if table else 0} cols")
 
         # Try to identify header row
         header = table[0] if table else []
-        header_lower = [str(h).lower() if h else '' for h in header]
+        header_lower = [str(h).lower().strip() if h else '' for h in header]
 
-        # Find column indices
+        # Find column indices from header
         date_col = None
         desc_col = None
         amount_col = None
         debit_col = None
         credit_col = None
+        type_col = None
+        balance_col = None
 
         for i, h in enumerate(header_lower):
-            if any(kw in h for kw in ['date', 'posted']):
+            if not h:
+                continue
+            if date_col is None and any(kw in h for kw in ['date', 'posted', 'trans']):
                 date_col = i
-            elif any(kw in h for kw in ['description', 'details', 'memo', 'payee']):
+            elif desc_col is None and any(kw in h for kw in ['description', 'details', 'memo', 'payee', 'particulars', 'narration']):
                 desc_col = i
-            elif 'amount' in h or 'value' in h:
+            elif type_col is None and h == 'type':
+                type_col = i
+            elif amount_col is None and ('amount' in h or h == 'value'):
                 amount_col = i
-            elif any(kw in h for kw in ['debit', 'withdrawal', 'withdrawals']):
+            elif debit_col is None and any(kw in h for kw in ['debit', 'withdrawal', 'withdrawals', 'dr', 'money out']):
                 debit_col = i
-            elif any(kw in h for kw in ['credit', 'deposit', 'deposits']):
+            elif credit_col is None and any(kw in h for kw in ['credit', 'deposit', 'deposits', 'cr', 'money in']):
                 credit_col = i
+            elif balance_col is None and 'balance' in h:
+                balance_col = i
+
+        print(f"[table_process] Header cols - date:{date_col}, desc:{desc_col}, amount:{amount_col}, debit:{debit_col}, credit:{credit_col}, type:{type_col}")
+
+        # Check if first row looks like a header or data
+        has_header = any(h for h in header_lower if h and not self._parse_date(header[header_lower.index(h)] if h else ''))
 
         # If we couldn't identify columns from header, try to infer from data
         if date_col is None:
             # Look for date-like values in first few rows
-            for i in range(min(len(table[0]), 5)):
-                for row in table[1:3]:
-                    if i < len(row) and row[i]:
-                        if self._parse_date(str(row[i])):
-                            date_col = i
-                            break
+            check_rows = table[1:4] if has_header else table[:3]
+            for row in check_rows:
+                for i, cell in enumerate(row):
+                    if cell and self._parse_date(str(cell)):
+                        date_col = i
+                        print(f"[table_process] Inferred date column: {i} from value '{cell}'")
+                        break
                 if date_col is not None:
                     break
 
-        # Process data rows (skip header)
-        start_row = 1 if any(h for h in header_lower if h) else 0
+        # Process data rows
+        start_row = 1 if has_header else 0
 
         for row_idx, row in enumerate(table[start_row:], start=start_row):
             try:
+                # Skip empty rows
+                if not row or all(not cell for cell in row):
+                    continue
+
                 transaction = {}
 
                 # Extract date
@@ -469,23 +521,56 @@ class BankStatementParser:
                         transaction['date'] = parsed_date
                     else:
                         continue  # Skip rows without valid date
+                else:
+                    # Try to find date in any column
+                    for i, cell in enumerate(row):
+                        if cell:
+                            parsed_date = self._parse_date(str(cell))
+                            if parsed_date:
+                                transaction['date'] = parsed_date
+                                if date_col is None:
+                                    date_col = i
+                                break
+                    if 'date' not in transaction:
+                        continue
 
                 # Extract description
                 if desc_col is not None and desc_col < len(row) and row[desc_col]:
                     transaction['description'] = str(row[desc_col]).strip()
                 else:
-                    # Try to use any non-numeric, non-date column as description
+                    # Try to use any text column as description
                     for i, cell in enumerate(row):
-                        if i != date_col and cell:
+                        if i != date_col and i != balance_col and cell:
                             cell_str = str(cell).strip()
-                            if cell_str and not self._parse_amount(cell_str) and not self._parse_date(cell_str):
-                                transaction['description'] = cell_str
-                                break
+                            # Check if it's not a number and not a date
+                            if cell_str and len(cell_str) > 2:
+                                amt = self._parse_amount(cell_str)
+                                dt = self._parse_date(cell_str)
+                                if amt is None and dt is None:
+                                    transaction['description'] = cell_str
+                                    break
 
-                # Extract amount
+                # Extract transaction type if available
+                tx_type = None
+                if type_col is not None and type_col < len(row) and row[type_col]:
+                    type_val = str(row[type_col]).upper().strip()
+                    if type_val in ['CREDIT', 'CR', 'C']:
+                        tx_type = 'credit'
+                    elif type_val in ['DEBIT', 'DR', 'D']:
+                        tx_type = 'debit'
+
+                # Extract amount - try multiple strategies
+                amount_found = False
+
+                # Strategy 1: Use amount column
                 if amount_col is not None and amount_col < len(row) and row[amount_col]:
-                    transaction['amount'] = self._parse_amount(row[amount_col])
-                elif debit_col is not None or credit_col is not None:
+                    amt = self._parse_amount(row[amount_col])
+                    if amt is not None:
+                        transaction['amount'] = amt
+                        amount_found = True
+
+                # Strategy 2: Use debit/credit columns
+                if not amount_found and (debit_col is not None or credit_col is not None):
                     debit = 0
                     credit = 0
                     if debit_col is not None and debit_col < len(row) and row[debit_col]:
@@ -496,17 +581,39 @@ class BankStatementParser:
                     if debit > 0:
                         transaction['amount'] = -debit
                         transaction['type'] = 'debit'
+                        amount_found = True
                     elif credit > 0:
                         transaction['amount'] = credit
                         transaction['type'] = 'credit'
-                else:
-                    # Try to find amount in any column
+                        amount_found = True
+
+                # Strategy 3: Find any amount in remaining columns
+                if not amount_found:
+                    amounts_found = []
                     for i, cell in enumerate(row):
-                        if i != date_col and i != desc_col and cell:
+                        if i != date_col and i != desc_col and i != type_col and cell:
                             amt = self._parse_amount(cell)
-                            if amt is not None:
-                                transaction['amount'] = amt
-                                break
+                            if amt is not None and amt != 0:
+                                amounts_found.append((i, amt))
+
+                    # If we have amounts, use the first non-balance one
+                    if amounts_found:
+                        # If balance column is known, exclude it
+                        if balance_col is not None:
+                            amounts_found = [(i, a) for i, a in amounts_found if i != balance_col]
+                        if amounts_found:
+                            transaction['amount'] = amounts_found[0][1]
+                            amount_found = True
+
+                # Apply type if known
+                if tx_type:
+                    transaction['type'] = tx_type
+                    # Adjust amount sign based on type
+                    if 'amount' in transaction:
+                        if tx_type == 'debit' and transaction['amount'] > 0:
+                            transaction['amount'] = -transaction['amount']
+                        elif tx_type == 'credit' and transaction['amount'] < 0:
+                            transaction['amount'] = abs(transaction['amount'])
 
                 # Add transaction ID
                 transaction['transaction_id'] = f'pdf_table_{page_num}_{row_idx}'
@@ -578,32 +685,40 @@ class BankStatementParser:
 
             # Try multiple date patterns
             date_patterns = [
-                r'^(\d{1,2}/\d{1,2})\s+(.+)',           # MM/DD ...
-                r'^(\d{1,2}-\d{1,2})\s+(.+)',           # MM-DD ...
-                r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+(.+)',   # MM/DD/YYYY ...
-                r'^(\d{1,2}-\d{1,2}-\d{2,4})\s+(.+)',   # MM-DD-YYYY ...
+                # Numeric date formats
+                r'^(\d{4}-\d{2}-\d{2})\s+(.+)',         # YYYY-MM-DD (ISO format)
+                r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+(.+)',   # MM/DD/YYYY or DD/MM/YYYY
+                r'^(\d{1,2}-\d{1,2}-\d{2,4})\s+(.+)',   # MM-DD-YYYY or DD-MM-YYYY
+                r'^(\d{1,2}/\d{1,2})\s+(.+)',           # MM/DD or DD/MM
+                r'^(\d{1,2}-\d{1,2})\s+(.+)',           # MM-DD or DD-MM
+                # Text date formats (e.g., "1 February", "3 Feb")
+                r'^(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\s+(.+)',
+                r'^(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))\s+(.+)',
             ]
 
             match = None
             for dp in date_patterns:
-                match = re.match(dp, line)
+                match = re.match(dp, line, re.IGNORECASE)
                 if match:
                     break
 
             if not match:
                 # Also try to find date anywhere in the line
-                match = re.search(r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)', line)
-                if match:
+                date_search = re.search(r'(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)', line)
+                if date_search:
                     # Try to split around the date
-                    date_str = match.group(1)
-                    rest = line[match.end():].strip()
+                    date_str = date_search.group(1)
+                    rest = line[date_search.end():].strip()
                     if rest and re.search(r'[\d,]+\.\d{2}', rest):
                         match = type('Match', (), {'group': lambda self, n: date_str if n == 1 else rest})()
 
             if not match:
                 continue
 
-            match = re.match(r'^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.+)', line)
+            # Re-extract using the generic pattern for consistency
+            generic_match = re.match(r'^(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))\s+(.+)', line, re.IGNORECASE)
+            if generic_match:
+                match = generic_match
             if match:
                 date_str = match.group(1)
                 rest = match.group(2)

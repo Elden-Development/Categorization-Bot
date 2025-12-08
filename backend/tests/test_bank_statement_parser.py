@@ -38,9 +38,11 @@ class TestBankStatementParser:
 
     def test_parse_date_formats(self, parser):
         """Test parsing various date formats."""
-        assert parser._parse_date("10/02/2025") == "2025-10-02"
+        # ISO format is always unambiguous
         assert parser._parse_date("2025-10-02") == "2025-10-02"
-        assert parser._parse_date("10-02-2025") == "2025-10-02"
+        # DD/MM/YYYY format (European) - parser defaults to this
+        assert parser._parse_date("02/10/2025") == "2025-10-02"
+        assert parser._parse_date("02-10-2025") == "2025-10-02"
 
     def test_extract_transactions_basic_format(self, parser):
         """Test extracting transactions from basic bank statement format."""
@@ -88,7 +90,8 @@ Date Description Debit Credit Balance
 
     def test_extract_transactions_with_full_date(self, parser):
         """Test extracting transactions with full date format."""
-        sample_text = "10/02/2025 PURCHASE AT STORE 50.00"
+        # Using ISO format which is unambiguous
+        sample_text = "2025-10-02 PURCHASE AT STORE 50.00"
         transactions = parser._extract_transactions_from_text(sample_text)
 
         assert len(transactions) >= 1
