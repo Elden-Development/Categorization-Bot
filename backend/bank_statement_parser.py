@@ -331,7 +331,7 @@ class BankStatementParser:
         """
         Extract transactions from bank statement text.
 
-        Uses regex patterns to identify transaction lines.
+        Uses multiple regex patterns to identify transaction lines from various bank formats.
 
         Parameters:
         text (str): Full bank statement text
@@ -340,30 +340,106 @@ class BankStatementParser:
         List[Dict]: List of transactions
         """
         transactions = []
+        lines = text.split('\n')
 
-        # Common bank statement transaction pattern
-        # Date, Description, Amount
-        # Pattern: Date (MM/DD/YYYY or similar) followed by text and amount
-        pattern = r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s+(.+?)\s+([-+]?\$?\s*[\d,]+\.\d{2})'
+        # Try multiple patterns
+        patterns = [
+            # Pattern 1: MM/DD Description Debit Credit Balance (common bank format)
+            # e.g., "10/02 POS PURCHASE 4.23 65.73"
+            r'^(\d{1,2}/\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})\s*([\d,]+\.\d{2})?\s*([\d,]+\.\d{2})?$',
 
-        matches = re.finditer(pattern, text, re.MULTILINE)
+            # Pattern 2: MM/DD/YYYY or MM/DD/YY format with amount at end
+            r'^(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s+(.+?)\s+([-+]?\$?[\d,]+\.\d{2})\s*$',
 
-        for idx, match in enumerate(matches):
-            try:
-                transaction = {
-                    'transaction_id': f'pdf_tx_{idx}',
-                    'date': self._parse_date(match.group(1)),
-                    'description': match.group(2).strip(),
-                    'amount': self._parse_amount(match.group(3))
-                }
+            # Pattern 3: Date Description Amount (amount can be anywhere)
+            r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+([A-Z][A-Za-z0-9\s\-\*#]+?)\s+([\d,]+\.\d{2})',
+        ]
 
-                if transaction['date'] and transaction['amount'] is not None:
-                    transactions.append(transaction)
-
-            except Exception as e:
-                print(f"Error parsing transaction from PDF: {str(e)}")
+        # First, try the line-by-line approach for tabular data
+        for idx, line in enumerate(lines):
+            line = line.strip()
+            if not line:
                 continue
 
+            # Skip header lines
+            if any(header in line.lower() for header in ['date', 'description', 'balance', 'debit', 'credit', 'amount', 'transaction']):
+                if 'date' in line.lower() and 'description' in line.lower():
+                    continue
+
+            # Try Pattern 1: MM/DD with multiple amounts (debit/credit/balance)
+            match = re.match(r'^(\d{1,2}/\d{1,2})\s+(.+)', line)
+            if match:
+                date_str = match.group(1)
+                rest = match.group(2)
+
+                # Extract all amounts from the rest of the line
+                amounts = re.findall(r'([\d,]+\.\d{2})', rest)
+
+                if amounts:
+                    # Remove amounts from description
+                    description = re.sub(r'\s*[\d,]+\.\d{2}\s*', ' ', rest).strip()
+
+                    # Determine debit/credit based on position or value
+                    # Usually: first amount is debit OR credit, last is balance
+                    if len(amounts) >= 1:
+                        # Get the first non-balance amount (usually debit or credit)
+                        amount = self._parse_amount(amounts[0])
+
+                        # If there are multiple amounts, check context
+                        # In many formats: debit is first, credit is second, balance is last
+                        transaction_type = 'debit'  # default
+                        if len(amounts) >= 2:
+                            # If first amount position is after "credit" keyword, it's a credit
+                            if 'credit' in description.lower() or 'deposit' in description.lower():
+                                transaction_type = 'credit'
+                            else:
+                                # Check if it looks like a debit (has debit keywords)
+                                if any(kw in description.lower() for kw in ['purchase', 'withdrawal', 'debit', 'check', 'payment']):
+                                    transaction_type = 'debit'
+                                    amount = -abs(amount) if amount else amount
+
+                        # Add current year to date
+                        current_year = datetime.now().year
+                        full_date = f"{date_str}/{current_year}"
+
+                        transaction = {
+                            'transaction_id': f'pdf_tx_{idx}',
+                            'date': self._parse_date(full_date),
+                            'description': description,
+                            'amount': amount,
+                            'type': transaction_type
+                        }
+
+                        if transaction['date'] and transaction['amount'] is not None:
+                            transactions.append(transaction)
+                        continue
+
+            # Try other patterns
+            for pattern in patterns[1:]:
+                match = re.search(pattern, line)
+                if match:
+                    try:
+                        date_str = match.group(1)
+                        # Add year if not present
+                        if len(date_str) <= 5:  # MM/DD format
+                            date_str = f"{date_str}/{datetime.now().year}"
+
+                        transaction = {
+                            'transaction_id': f'pdf_tx_{idx}',
+                            'date': self._parse_date(date_str),
+                            'description': match.group(2).strip(),
+                            'amount': self._parse_amount(match.group(3))
+                        }
+
+                        if transaction['date'] and transaction['amount'] is not None:
+                            transactions.append(transaction)
+                            break  # Found a match, move to next line
+
+                    except Exception as e:
+                        print(f"Error parsing transaction from PDF line: {str(e)}")
+                        continue
+
+        print(f"PDF parser extracted {len(transactions)} transactions")
         return transactions
 
     def parse(self, file_content: bytes, file_type: str) -> List[Dict]:

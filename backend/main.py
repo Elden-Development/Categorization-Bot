@@ -3108,10 +3108,15 @@ async def parse_bank_statement(
         # Parse the statement with basic parser first
         transactions = parser.parse(file_content, file_type)
 
-        # If basic parser returns no transactions for PDF, try Gemini AI
+        # Track parsing method
+        if len(transactions) > 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
+            parsing_method = "pdf_text_extraction"
+            print(f"Basic PDF parser found {len(transactions)} transactions")
+
+        # If basic parser returns no transactions for PDF, try Gemini AI as fallback
         gemini_error_message = None
         if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
-            print(f"Basic parser found 0 transactions in PDF, trying Gemini AI...")
+            print(f"Basic PDF parser found 0 transactions, trying Gemini AI as fallback...")
             try:
                 transactions = await parse_bank_statement_with_gemini(file_content)
                 if len(transactions) > 0:
