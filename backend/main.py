@@ -4,6 +4,10 @@ import json
 import random
 from fastapi import FastAPI, UploadFile, File, Body, Form, Depends, HTTPException, status, Request, Query, BackgroundTasks
 import uuid
+
+# API Version - increment this to verify Railway deployment
+API_VERSION = "2.1.0"
+API_BUILD_DATE = "2025-12-08"
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, Any
@@ -464,7 +468,7 @@ class BatchJobTracker:
 batch_job_tracker = BatchJobTracker()
 
 
-app = FastAPI(title="Categorization Bot API", version="1.0.0")
+app = FastAPI(title="Categorization Bot API", version=API_VERSION)
 
 # Initialize rate limiter
 # Key function extracts client IP for rate limit tracking
@@ -534,9 +538,27 @@ async def root():
     """Root endpoint - basic API info"""
     return {
         "name": "Categorization Bot API",
-        "version": "1.0.0",
+        "version": API_VERSION,
+        "build_date": API_BUILD_DATE,
         "status": "running",
         "docs": "/docs"
+    }
+
+
+@app.get("/version")
+async def get_version():
+    """
+    Get API version info - use this to verify which version is deployed.
+    """
+    return {
+        "version": API_VERSION,
+        "build_date": API_BUILD_DATE,
+        "parser_features": [
+            "multi_date_format",
+            "text_date_parsing",
+            "table_vs_text_comparison",
+            "european_date_support"
+        ]
     }
 
 
