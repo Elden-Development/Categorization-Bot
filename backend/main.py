@@ -3183,6 +3183,22 @@ async def parse_bank_statement(
         # Initialize parser
         parser = BankStatementParser()
 
+        # For PDFs, check if text can be extracted
+        pdf_diagnostic = None
+        if file_type == 'pdf' or file_type == 'application/pdf':
+            try:
+                import pdfplumber
+                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                    text_length = sum(len(page.extract_text() or '') for page in pdf.pages)
+                    pdf_diagnostic = {
+                        "pages": len(pdf.pages),
+                        "text_extracted": text_length,
+                        "is_likely_scanned": text_length < 100
+                    }
+                    print(f"[PDF Diagnostic] Pages: {pdf_diagnostic['pages']}, Text: {text_length} chars")
+            except Exception as e:
+                print(f"[PDF Diagnostic] Error: {e}")
+
         # Parse the statement with basic parser first
         transactions = parser.parse(file_content, file_type)
 
@@ -3263,13 +3279,25 @@ async def parse_bank_statement(
 
         # If no transactions found from PDF (no Gemini error), suggest CSV
         if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
+            error_msg = "Could not extract transactions from this PDF."
+
+            # Add diagnostic info to help user understand the issue
+            if pdf_diagnostic:
+                if pdf_diagnostic.get("is_likely_scanned"):
+                    error_msg = f"This PDF appears to be scanned/image-based ({pdf_diagnostic.get('text_extracted', 0)} chars extracted). Scanned PDFs require OCR which is not supported."
+                elif pdf_diagnostic.get("text_extracted", 0) > 0:
+                    error_msg = f"PDF has text ({pdf_diagnostic.get('text_extracted')} chars) but no transactions were recognized. The format may not be supported."
+
+            error_msg += " TIP: Most banks offer CSV export - try downloading your statement as CSV instead."
+
             return {
                 "success": False,
-                "error": "Could not extract transactions from this PDF. TIP: Most banks offer CSV export - try downloading your statement as CSV instead.",
+                "error": error_msg,
                 "transactions": [],
                 "count": 0,
                 "file_name": file.filename,
-                "retry_suggested": False
+                "retry_suggested": False,
+                "diagnostic": pdf_diagnostic
             }
 
         return {

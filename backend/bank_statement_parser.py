@@ -319,11 +319,13 @@ class BankStatementParser:
         List[Dict]: List of transactions
         """
         transactions = []
+        total_text_length = 0
 
         # Try pdfplumber first (better for tabular data)
         if PDFPLUMBER_AVAILABLE:
             try:
-                transactions = self._parse_pdf_with_pdfplumber(file_content)
+                transactions, text_len = self._parse_pdf_with_pdfplumber_v2(file_content)
+                total_text_length = text_len
                 if transactions:
                     print(f"pdfplumber extracted {len(transactions)} transactions")
                     return transactions
@@ -337,7 +339,15 @@ class BankStatementParser:
             # Extract text from all pages
             full_text = ""
             for page in pdf_reader.pages:
-                full_text += page.extract_text() + "\n"
+                page_text = page.extract_text()
+                if page_text:
+                    full_text += page_text + "\n"
+
+            total_text_length = len(full_text)
+            print(f"[PyPDF2] Extracted {total_text_length} characters of text")
+
+            if total_text_length < 50:
+                print("[PyPDF2] WARNING: Very little text extracted - PDF may be image-based/scanned")
 
             # Try to extract transactions from text
             transactions = self._extract_transactions_from_text(full_text)
@@ -350,17 +360,12 @@ class BankStatementParser:
             print(f"Error parsing PDF: {str(e)}")
             return []
 
-    def _parse_pdf_with_pdfplumber(self, file_content: bytes) -> List[Dict]:
+    def _parse_pdf_with_pdfplumber_v2(self, file_content: bytes) -> tuple:
         """
-        Parse PDF using pdfplumber for better table extraction.
-
-        Parameters:
-        file_content (bytes): PDF file content
-
-        Returns:
-        List[Dict]: List of transactions
+        Parse PDF using pdfplumber, returns transactions and text length.
         """
         transactions = []
+        total_text_length = 0
 
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
             print(f"[pdfplumber] PDF has {len(pdf.pages)} pages")
@@ -374,23 +379,30 @@ class BankStatementParser:
                     for table_idx, table in enumerate(tables):
                         print(f"[pdfplumber] Table {table_idx} has {len(table)} rows")
                         if table and len(table) > 0:
-                            print(f"[pdfplumber] First row: {table[0][:5] if len(table[0]) > 5 else table[0]}")
+                            print(f"[pdfplumber] First row sample: {str(table[0])[:200]}")
                         table_transactions = self._process_table(table, page_num)
                         print(f"[pdfplumber] Extracted {len(table_transactions)} transactions from table {table_idx}")
                         transactions.extend(table_transactions)
 
-                # Also try text extraction (not just when no tables)
+                # Also try text extraction
                 text = page.extract_text()
                 if text:
+                    total_text_length += len(text)
                     # Show first 500 chars of text for debugging
-                    print(f"[pdfplumber] Page {page_num} text preview: {text[:500].replace(chr(10), ' | ')}")
+                    if page_num == 0:
+                        print(f"[pdfplumber] Page {page_num} text ({len(text)} chars): {text[:500].replace(chr(10), ' | ')}")
+
                     text_transactions = self._extract_transactions_from_text(text)
-                    print(f"[pdfplumber] Extracted {len(text_transactions)} transactions from text")
+                    print(f"[pdfplumber] Extracted {len(text_transactions)} transactions from text on page {page_num}")
                     # Only add text transactions if we didn't get any from tables
                     if not tables or len(transactions) == 0:
                         transactions.extend(text_transactions)
 
-        return transactions
+        print(f"[pdfplumber] Total text extracted: {total_text_length} characters")
+        if total_text_length < 100:
+            print("[pdfplumber] WARNING: Very little text - PDF may be scanned/image-based")
+
+        return transactions, total_text_length
 
     def _process_table(self, table: List[List], page_num: int) -> List[Dict]:
         """
@@ -528,7 +540,7 @@ class BankStatementParser:
 
         print(f"[text_extract] Processing {len(lines)} lines")
 
-        # Try multiple patterns
+        # Try multiple patterns - order matters, more specific first
         patterns = [
             # Pattern 1: MM/DD Description Debit Credit Balance (common bank format)
             # e.g., "10/02 POS PURCHASE 4.23 65.73"
@@ -538,7 +550,10 @@ class BankStatementParser:
             r'^(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s+(.+?)\s+([-+]?\$?[\d,]+\.\d{2})\s*$',
 
             # Pattern 3: Date Description Amount (amount can be anywhere)
-            r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+([A-Z][A-Za-z0-9\s\-\*#]+?)\s+([\d,]+\.\d{2})',
+            r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+([A-Za-z][A-Za-z0-9\s\-\*#]+?)\s+([\d,]+\.\d{2})',
+
+            # Pattern 4: More flexible - any line starting with date-like pattern
+            r'^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.+)',
         ]
 
         # Show some sample lines for debugging
@@ -551,14 +566,44 @@ class BankStatementParser:
             if not line:
                 continue
 
-            # Skip header lines
-            if any(header in line.lower() for header in ['date', 'description', 'balance', 'debit', 'credit', 'amount', 'transaction']):
-                if 'date' in line.lower() and 'description' in line.lower():
-                    print(f"[text_extract] Skipping header line: {line[:80]}")
-                    continue
+            # Skip header lines - but be careful not to skip too much
+            lower_line = line.lower()
+            if 'date' in lower_line and ('description' in lower_line or 'balance' in lower_line):
+                print(f"[text_extract] Skipping header line: {line[:80]}")
+                continue
 
-            # Try Pattern 1: MM/DD with multiple amounts (debit/credit/balance)
-            match = re.match(r'^(\d{1,2}/\d{1,2})\s+(.+)', line)
+            # Skip summary/total lines
+            if lower_line.startswith('total') or lower_line.startswith('ending balance'):
+                continue
+
+            # Try multiple date patterns
+            date_patterns = [
+                r'^(\d{1,2}/\d{1,2})\s+(.+)',           # MM/DD ...
+                r'^(\d{1,2}-\d{1,2})\s+(.+)',           # MM-DD ...
+                r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+(.+)',   # MM/DD/YYYY ...
+                r'^(\d{1,2}-\d{1,2}-\d{2,4})\s+(.+)',   # MM-DD-YYYY ...
+            ]
+
+            match = None
+            for dp in date_patterns:
+                match = re.match(dp, line)
+                if match:
+                    break
+
+            if not match:
+                # Also try to find date anywhere in the line
+                match = re.search(r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)', line)
+                if match:
+                    # Try to split around the date
+                    date_str = match.group(1)
+                    rest = line[match.end():].strip()
+                    if rest and re.search(r'[\d,]+\.\d{2}', rest):
+                        match = type('Match', (), {'group': lambda self, n: date_str if n == 1 else rest})()
+
+            if not match:
+                continue
+
+            match = re.match(r'^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.+)', line)
             if match:
                 date_str = match.group(1)
                 rest = match.group(2)
@@ -589,9 +634,12 @@ class BankStatementParser:
                                     transaction_type = 'debit'
                                     amount = -abs(amount) if amount else amount
 
-                        # Add current year to date
-                        current_year = datetime.now().year
-                        full_date = f"{date_str}/{current_year}"
+                        # Add current year to date if not already present
+                        if len(date_str) <= 5:  # MM/DD format without year
+                            current_year = datetime.now().year
+                            full_date = f"{date_str}/{current_year}"
+                        else:
+                            full_date = date_str
 
                         transaction = {
                             'transaction_id': f'pdf_tx_{idx}',
