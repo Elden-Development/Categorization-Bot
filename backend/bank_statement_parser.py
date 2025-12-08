@@ -363,19 +363,31 @@ class BankStatementParser:
         transactions = []
 
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+            print(f"[pdfplumber] PDF has {len(pdf.pages)} pages")
+
             for page_num, page in enumerate(pdf.pages):
                 # Try to extract tables first
                 tables = page.extract_tables()
+                print(f"[pdfplumber] Page {page_num}: found {len(tables) if tables else 0} tables")
+
                 if tables:
-                    for table in tables:
+                    for table_idx, table in enumerate(tables):
+                        print(f"[pdfplumber] Table {table_idx} has {len(table)} rows")
+                        if table and len(table) > 0:
+                            print(f"[pdfplumber] First row: {table[0][:5] if len(table[0]) > 5 else table[0]}")
                         table_transactions = self._process_table(table, page_num)
+                        print(f"[pdfplumber] Extracted {len(table_transactions)} transactions from table {table_idx}")
                         transactions.extend(table_transactions)
 
-                # If no tables found, try text extraction
-                if not tables:
-                    text = page.extract_text()
-                    if text:
-                        text_transactions = self._extract_transactions_from_text(text)
+                # Also try text extraction (not just when no tables)
+                text = page.extract_text()
+                if text:
+                    # Show first 500 chars of text for debugging
+                    print(f"[pdfplumber] Page {page_num} text preview: {text[:500].replace(chr(10), ' | ')}")
+                    text_transactions = self._extract_transactions_from_text(text)
+                    print(f"[pdfplumber] Extracted {len(text_transactions)} transactions from text")
+                    # Only add text transactions if we didn't get any from tables
+                    if not tables or len(transactions) == 0:
                         transactions.extend(text_transactions)
 
         return transactions
@@ -514,6 +526,8 @@ class BankStatementParser:
         transactions = []
         lines = text.split('\n')
 
+        print(f"[text_extract] Processing {len(lines)} lines")
+
         # Try multiple patterns
         patterns = [
             # Pattern 1: MM/DD Description Debit Credit Balance (common bank format)
@@ -527,6 +541,10 @@ class BankStatementParser:
             r'(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+([A-Z][A-Za-z0-9\s\-\*#]+?)\s+([\d,]+\.\d{2})',
         ]
 
+        # Show some sample lines for debugging
+        sample_lines = [l.strip() for l in lines[:20] if l.strip()]
+        print(f"[text_extract] First 20 non-empty lines: {sample_lines}")
+
         # First, try the line-by-line approach for tabular data
         for idx, line in enumerate(lines):
             line = line.strip()
@@ -536,6 +554,7 @@ class BankStatementParser:
             # Skip header lines
             if any(header in line.lower() for header in ['date', 'description', 'balance', 'debit', 'credit', 'amount', 'transaction']):
                 if 'date' in line.lower() and 'description' in line.lower():
+                    print(f"[text_extract] Skipping header line: {line[:80]}")
                     continue
 
             # Try Pattern 1: MM/DD with multiple amounts (debit/credit/balance)

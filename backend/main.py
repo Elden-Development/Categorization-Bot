@@ -3078,6 +3078,84 @@ async def list_bank_statements(
     ]
 
 
+@app.post("/debug-pdf-extraction")
+@limiter.limit("10/minute")
+async def debug_pdf_extraction(
+    request: Request,
+    file: UploadFile = File(...)
+):
+    """
+    Debug endpoint to see what text is extracted from a PDF.
+    Returns raw extracted text and table data for debugging.
+    """
+    try:
+        file_content = await file.read()
+
+        debug_info = {
+            "file_name": file.filename,
+            "file_type": file.content_type,
+            "file_size": len(file_content),
+            "pdfplumber_available": False,
+            "tables": [],
+            "text_preview": "",
+            "lines_with_dates": []
+        }
+
+        # Try pdfplumber
+        try:
+            import pdfplumber
+            debug_info["pdfplumber_available"] = True
+
+            with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                debug_info["page_count"] = len(pdf.pages)
+
+                for page_num, page in enumerate(pdf.pages):
+                    # Get tables
+                    tables = page.extract_tables()
+                    if tables:
+                        for table_idx, table in enumerate(tables):
+                            debug_info["tables"].append({
+                                "page": page_num,
+                                "table_idx": table_idx,
+                                "rows": len(table),
+                                "sample_rows": table[:5] if table else []
+                            })
+
+                    # Get text
+                    text = page.extract_text()
+                    if text and page_num == 0:
+                        debug_info["text_preview"] = text[:2000]
+
+                        # Find lines that look like they have dates
+                        import re
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if re.match(r'^\d{1,2}[/-]\d{1,2}', line):
+                                debug_info["lines_with_dates"].append(line[:100])
+                            if len(debug_info["lines_with_dates"]) >= 20:
+                                break
+
+        except Exception as e:
+            debug_info["pdfplumber_error"] = str(e)
+
+        # Also try PyPDF2
+        try:
+            from PyPDF2 import PdfReader
+            pdf_reader = PdfReader(io.BytesIO(file_content))
+            debug_info["pypdf2_page_count"] = len(pdf_reader.pages)
+
+            if pdf_reader.pages:
+                pypdf_text = pdf_reader.pages[0].extract_text()
+                debug_info["pypdf2_text_preview"] = pypdf_text[:1000] if pypdf_text else "No text extracted"
+        except Exception as e:
+            debug_info["pypdf2_error"] = str(e)
+
+        return debug_info
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/parse-bank-statement")
 @limiter.limit("10/minute")
 async def parse_bank_statement(
