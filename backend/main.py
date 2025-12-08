@@ -210,25 +210,65 @@ Return a JSON object with this structure:
 Parse all transactions from the bank statement:"""
 
 
-async def parse_bank_statement_with_gemini(file_content: bytes) -> List[Dict]:
+async def parse_bank_statement_with_gemini(file_content: bytes, use_image_mode: bool = False) -> List[Dict]:
     """
     Parse a PDF bank statement using Gemini AI.
 
     This is used as a fallback when the basic regex parser returns no results,
-    which happens with tabular PDF formats.
+    which happens with tabular PDF formats or scanned PDFs.
 
     Parameters:
     file_content (bytes): PDF file content
+    use_image_mode (bool): If True, convert PDF pages to images first (for scanned PDFs)
 
     Returns:
     List[Dict]: List of extracted transactions
     """
     try:
-        # Create a Gemini Part from the PDF bytes
-        file_part = types.Part.from_bytes(
-            data=file_content,
-            mime_type="application/pdf"
-        )
+        contents = [BANK_STATEMENT_PROMPT]
+
+        if use_image_mode:
+            # Convert PDF pages to images using pdfplumber for scanned PDFs
+            print("[Gemini] Using image mode for PDF extraction")
+            try:
+                import pdfplumber
+                from PIL import Image
+                import base64
+
+                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                    for page_num, page in enumerate(pdf.pages[:5]):  # Limit to first 5 pages
+                        # Render page to image
+                        img = page.to_image(resolution=150)
+
+                        # Convert to bytes
+                        img_buffer = io.BytesIO()
+                        img.original.save(img_buffer, format='PNG')
+                        img_bytes = img_buffer.getvalue()
+
+                        # Add image to contents
+                        image_part = types.Part.from_bytes(
+                            data=img_bytes,
+                            mime_type="image/png"
+                        )
+                        contents.append(image_part)
+                        print(f"[Gemini] Added page {page_num + 1} as image ({len(img_bytes)} bytes)")
+
+                if len(contents) == 1:
+                    print("[Gemini] Warning: No images extracted from PDF")
+                    return []
+
+            except Exception as img_error:
+                print(f"[Gemini] Error converting PDF to images: {img_error}")
+                # Fall back to direct PDF mode
+                use_image_mode = False
+
+        if not use_image_mode:
+            # Create a Gemini Part from the PDF bytes directly
+            file_part = types.Part.from_bytes(
+                data=file_content,
+                mime_type="application/pdf"
+            )
+            contents.append(file_part)
 
         # Call Gemini to extract transactions (with semaphore to prevent rate limits)
         async def extract_transactions():
@@ -236,13 +276,14 @@ async def parse_bank_statement_with_gemini(file_content: bytes) -> List[Dict]:
                 return await asyncio.to_thread(
                     client.models.generate_content,
                     model="gemini-2.0-flash",
-                    contents=[BANK_STATEMENT_PROMPT, file_part],
+                    contents=contents,
                     config={
                         "max_output_tokens": 40000,
                         "response_mime_type": "application/json"
                     }
                 )
 
+        print(f"[Gemini] Calling Gemini API with {len(contents)} content parts...")
         response = await retry_with_backoff(extract_transactions)
 
         if not response or not response.text:
@@ -3211,16 +3252,32 @@ async def parse_bank_statement(
         gemini_error_message = None
         if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
             print(f"Basic PDF parser found 0 transactions, trying Gemini AI as fallback...")
+
+            # First try direct PDF mode
             try:
-                transactions = await parse_bank_statement_with_gemini(file_content)
+                transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=False)
                 if len(transactions) > 0:
-                    parsing_method = "gemini_ai"
-                    print(f"Gemini AI successfully extracted {len(transactions)} transactions")
+                    parsing_method = "gemini_ai_pdf"
+                    print(f"Gemini AI (PDF mode) successfully extracted {len(transactions)} transactions")
             except Exception as gemini_error:
                 error_str = str(gemini_error)
-                print(f"Gemini AI parsing failed: {error_str}")
+                print(f"Gemini AI (PDF mode) failed: {error_str}")
                 gemini_error_message = get_user_friendly_error(gemini_error)
-                # Keep transactions as empty list from basic parser
+
+            # If PDF mode failed and PDF looks scanned, try image mode
+            if len(transactions) == 0 and pdf_diagnostic and pdf_diagnostic.get("is_likely_scanned"):
+                print(f"PDF appears to be scanned, trying Gemini AI with image mode...")
+                try:
+                    transactions = await parse_bank_statement_with_gemini(file_content, use_image_mode=True)
+                    if len(transactions) > 0:
+                        parsing_method = "gemini_ai_image"
+                        print(f"Gemini AI (image mode) successfully extracted {len(transactions)} transactions")
+                        gemini_error_message = None  # Clear error since we succeeded
+                except Exception as img_gemini_error:
+                    error_str = str(img_gemini_error)
+                    print(f"Gemini AI (image mode) also failed: {error_str}")
+                    if not gemini_error_message:
+                        gemini_error_message = get_user_friendly_error(img_gemini_error)
 
         # Save to database if user is authenticated
         db_statement = None
