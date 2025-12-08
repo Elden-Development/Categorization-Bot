@@ -85,7 +85,28 @@ const PDFProcessor = () => {
   const selectedDocument = documents.find(doc => doc.id === selectedDocumentId);
 
   // Add files to document queue
+  // Detect if a filename looks like a bank statement
+  const looksLikeBankStatement = (filename) => {
+    const lower = filename.toLowerCase();
+    const bankKeywords = [
+      'statement', 'bank', 'checking', 'savings', 'account',
+      'transaction', 'balance', 'deposit', 'withdrawal'
+    ];
+    return bankKeywords.some(keyword => lower.includes(keyword));
+  };
+
   const addFilesToQueue = (files) => {
+    // Check if any files look like bank statements
+    const bankStatementFiles = files.filter(f => looksLikeBankStatement(f.name));
+    if (bankStatementFiles.length > 0) {
+      toast.info(
+        `"${bankStatementFiles[0].name}" looks like a bank statement. ` +
+        `For bank statements, use the "Bank Statement" upload on the right panel instead. ` +
+        `This section is for invoices and receipts.`,
+        { duration: 8000 }
+      );
+    }
+
     const newDocuments = files.map(file => ({
       id: `doc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       fileName: file.name,
