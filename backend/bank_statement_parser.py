@@ -13,6 +13,14 @@ from typing import List, Dict, Optional
 import pandas as pd
 from PyPDF2 import PdfReader
 
+# Try to import pdfplumber for better table extraction
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+    print("pdfplumber not available, using PyPDF2 for PDF parsing")
+
 
 class BankStatementParser:
     """
@@ -302,7 +310,7 @@ class BankStatementParser:
         """
         Parse a PDF bank statement.
 
-        Extracts text and attempts to identify transaction patterns.
+        Uses pdfplumber for table extraction (preferred) or PyPDF2 for text extraction.
 
         Parameters:
         file_content (bytes): PDF file content
@@ -310,6 +318,19 @@ class BankStatementParser:
         Returns:
         List[Dict]: List of transactions
         """
+        transactions = []
+
+        # Try pdfplumber first (better for tabular data)
+        if PDFPLUMBER_AVAILABLE:
+            try:
+                transactions = self._parse_pdf_with_pdfplumber(file_content)
+                if transactions:
+                    print(f"pdfplumber extracted {len(transactions)} transactions")
+                    return transactions
+            except Exception as e:
+                print(f"pdfplumber parsing failed: {str(e)}")
+
+        # Fall back to PyPDF2 text extraction
         try:
             pdf_reader = PdfReader(io.BytesIO(file_content))
 
@@ -320,12 +341,163 @@ class BankStatementParser:
 
             # Try to extract transactions from text
             transactions = self._extract_transactions_from_text(full_text)
+            if transactions:
+                print(f"PyPDF2 text extraction found {len(transactions)} transactions")
 
             return transactions
 
         except Exception as e:
             print(f"Error parsing PDF: {str(e)}")
             return []
+
+    def _parse_pdf_with_pdfplumber(self, file_content: bytes) -> List[Dict]:
+        """
+        Parse PDF using pdfplumber for better table extraction.
+
+        Parameters:
+        file_content (bytes): PDF file content
+
+        Returns:
+        List[Dict]: List of transactions
+        """
+        transactions = []
+
+        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                # Try to extract tables first
+                tables = page.extract_tables()
+                if tables:
+                    for table in tables:
+                        table_transactions = self._process_table(table, page_num)
+                        transactions.extend(table_transactions)
+
+                # If no tables found, try text extraction
+                if not tables:
+                    text = page.extract_text()
+                    if text:
+                        text_transactions = self._extract_transactions_from_text(text)
+                        transactions.extend(text_transactions)
+
+        return transactions
+
+    def _process_table(self, table: List[List], page_num: int) -> List[Dict]:
+        """
+        Process a table extracted from PDF and convert to transactions.
+
+        Parameters:
+        table: 2D list of table cells
+        page_num: Page number for transaction IDs
+
+        Returns:
+        List[Dict]: List of transactions
+        """
+        transactions = []
+
+        if not table or len(table) < 2:
+            return transactions
+
+        # Try to identify header row
+        header = table[0] if table else []
+        header_lower = [str(h).lower() if h else '' for h in header]
+
+        # Find column indices
+        date_col = None
+        desc_col = None
+        amount_col = None
+        debit_col = None
+        credit_col = None
+
+        for i, h in enumerate(header_lower):
+            if any(kw in h for kw in ['date', 'posted']):
+                date_col = i
+            elif any(kw in h for kw in ['description', 'details', 'memo', 'payee']):
+                desc_col = i
+            elif 'amount' in h or 'value' in h:
+                amount_col = i
+            elif any(kw in h for kw in ['debit', 'withdrawal', 'withdrawals']):
+                debit_col = i
+            elif any(kw in h for kw in ['credit', 'deposit', 'deposits']):
+                credit_col = i
+
+        # If we couldn't identify columns from header, try to infer from data
+        if date_col is None:
+            # Look for date-like values in first few rows
+            for i in range(min(len(table[0]), 5)):
+                for row in table[1:3]:
+                    if i < len(row) and row[i]:
+                        if self._parse_date(str(row[i])):
+                            date_col = i
+                            break
+                if date_col is not None:
+                    break
+
+        # Process data rows (skip header)
+        start_row = 1 if any(h for h in header_lower if h) else 0
+
+        for row_idx, row in enumerate(table[start_row:], start=start_row):
+            try:
+                transaction = {}
+
+                # Extract date
+                if date_col is not None and date_col < len(row) and row[date_col]:
+                    parsed_date = self._parse_date(str(row[date_col]))
+                    if parsed_date:
+                        transaction['date'] = parsed_date
+                    else:
+                        continue  # Skip rows without valid date
+
+                # Extract description
+                if desc_col is not None and desc_col < len(row) and row[desc_col]:
+                    transaction['description'] = str(row[desc_col]).strip()
+                else:
+                    # Try to use any non-numeric, non-date column as description
+                    for i, cell in enumerate(row):
+                        if i != date_col and cell:
+                            cell_str = str(cell).strip()
+                            if cell_str and not self._parse_amount(cell_str) and not self._parse_date(cell_str):
+                                transaction['description'] = cell_str
+                                break
+
+                # Extract amount
+                if amount_col is not None and amount_col < len(row) and row[amount_col]:
+                    transaction['amount'] = self._parse_amount(row[amount_col])
+                elif debit_col is not None or credit_col is not None:
+                    debit = 0
+                    credit = 0
+                    if debit_col is not None and debit_col < len(row) and row[debit_col]:
+                        debit = self._parse_amount(row[debit_col]) or 0
+                    if credit_col is not None and credit_col < len(row) and row[credit_col]:
+                        credit = self._parse_amount(row[credit_col]) or 0
+
+                    if debit > 0:
+                        transaction['amount'] = -debit
+                        transaction['type'] = 'debit'
+                    elif credit > 0:
+                        transaction['amount'] = credit
+                        transaction['type'] = 'credit'
+                else:
+                    # Try to find amount in any column
+                    for i, cell in enumerate(row):
+                        if i != date_col and i != desc_col and cell:
+                            amt = self._parse_amount(cell)
+                            if amt is not None:
+                                transaction['amount'] = amt
+                                break
+
+                # Add transaction ID
+                transaction['transaction_id'] = f'pdf_table_{page_num}_{row_idx}'
+
+                # Only add if we have required fields
+                if 'date' in transaction and 'amount' in transaction:
+                    if 'description' not in transaction:
+                        transaction['description'] = 'Unknown'
+                    transactions.append(transaction)
+
+            except Exception as e:
+                print(f"Error processing table row {row_idx}: {str(e)}")
+                continue
+
+        return transactions
 
     def _extract_transactions_from_text(self, text: str) -> List[Dict]:
         """
