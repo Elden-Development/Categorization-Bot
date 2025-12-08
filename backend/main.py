@@ -230,19 +230,20 @@ async def parse_bank_statement_with_gemini(file_content: bytes) -> List[Dict]:
             mime_type="application/pdf"
         )
 
-        # Call Gemini to extract transactions
+        # Call Gemini to extract transactions (with semaphore to prevent rate limits)
         async def extract_transactions():
-            return await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=[BANK_STATEMENT_PROMPT, file_part],
-                config={
-                    "max_output_tokens": 40000,
-                    "response_mime_type": "application/json"
-                }
-            )
+            async with GEMINI_SEMAPHORE:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=[BANK_STATEMENT_PROMPT, file_part],
+                    config={
+                        "max_output_tokens": 40000,
+                        "response_mime_type": "application/json"
+                    }
+                )
 
-        response = await retry_with_backoff(extract_transactions, max_retries=3, initial_delay=2)
+        response = await retry_with_backoff(extract_transactions)
 
         if not response or not response.text:
             print("Warning: Gemini returned empty response for bank statement")
@@ -969,16 +970,20 @@ async def verify_extraction(json_data):
         DO NOT flag differences in formatting, string representations, or character encoding.
         """
         
-        # Make the API call to Gemini
-        verification_response = await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=[verification_prompt],
-            config={
-                "max_output_tokens": 4000,
-                "response_mime_type": "application/json"
-            }
-        )
+        # Make the API call to Gemini (with semaphore and retry)
+        async def verify_with_gemini():
+            async with GEMINI_SEMAPHORE:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=[verification_prompt],
+                    config={
+                        "max_output_tokens": 4000,
+                        "response_mime_type": "application/json"
+                    }
+                )
+
+        verification_response = await retry_with_backoff(verify_with_gemini)
         
         # Extract verification results
         try:
@@ -1305,9 +1310,9 @@ async def process_file(
                 result = await process_page(page, schema)
                 page_results.append(result)
 
-                # Add delay between pages to respect rate limits (except after last page)
+                # Add small delay between pages to respect rate limits (except after last page)
                 if i < total_pages - 1:
-                    await asyncio.sleep(1.5)  # 1.5 second delay between pages
+                    await asyncio.sleep(0.5)  # 0.5 second delay between pages
 
             # Merge the JSON results from each page.
             merged_result = merge_page_results(page_results)
@@ -1622,20 +1627,21 @@ async def research_vendor(
             google_search=types.GoogleSearch()
         )
 
-        # Send the request to Gemini API with search enabled (with retry for rate limits)
+        # Send the request to Gemini API with search enabled (with semaphore and retry)
         async def make_api_call():
-            return await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[google_search_tool],
-                    response_modalities=["TEXT"],
-                    temperature=0.2,  # Lower temperature to make response more focused
+            async with GEMINI_SEMAPHORE:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[google_search_tool],
+                        response_modalities=["TEXT"],
+                        temperature=0.2,  # Lower temperature to make response more focused
+                    )
                 )
-            )
 
-        response = await retry_with_backoff(make_api_call, max_retries=3, initial_delay=2)
+        response = await retry_with_backoff(make_api_call)
 
         # Save result to database if user is authenticated
         if current_user:
@@ -1770,21 +1776,22 @@ async def research_vendor_enhanced(
             google_search=types.GoogleSearch()
         )
 
-        # Send the request to Gemini API with search enabled (with retry for rate limits)
+        # Send the request to Gemini API with search enabled (with semaphore and retry)
         async def make_enhanced_api_call():
-            return await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[google_search_tool],
-                    response_modalities=["TEXT"],
-                    response_mime_type="application/json",
-                    temperature=0.2,
+            async with GEMINI_SEMAPHORE:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[google_search_tool],
+                        response_modalities=["TEXT"],
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    )
                 )
-            )
 
-        response = await retry_with_backoff(make_enhanced_api_call, max_retries=3, initial_delay=2)
+        response = await retry_with_backoff(make_enhanced_api_call)
 
         # Parse the response
         try:
@@ -1964,17 +1971,21 @@ async def categorize_transaction(request: Request, categorization_request: Finan
         classification aligns with standard chart of accounts structures.
         """
         
-        # Send the request to Gemini API
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config={
-                "max_output_tokens": 4000,
-                "response_mime_type": "application/json"
-            }
-        )
-        
+        # Send the request to Gemini API (with semaphore and retry)
+        async def categorize_with_gemini():
+            async with GEMINI_SEMAPHORE:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                    config={
+                        "max_output_tokens": 4000,
+                        "response_mime_type": "application/json"
+                    }
+                )
+
+        response = await retry_with_backoff(categorize_with_gemini)
+
         # Return the response
         try:
             # Try to parse the response as JSON
@@ -1983,10 +1994,10 @@ async def categorize_transaction(request: Request, categorization_request: Finan
         except json.JSONDecodeError:
             # If it's not valid JSON, return the raw text
             return {"response": response.text}
-            
+
     except Exception as e:
         print(f"Error categorizing transaction: {str(e)}")
-        return {"error": f"Error categorizing transaction: {str(e)}"}
+        return {"error": f"Error categorizing transaction: {get_user_friendly_error(e)}"}
 
 @app.post("/categorize-transaction-smart")
 @limiter.limit("20/minute")
@@ -2376,14 +2387,12 @@ def _add_to_cache(vendor_info: str, result: dict) -> None:
     cache_key = _normalize_for_cache(vendor_info)
     _gemini_cache[cache_key] = result
 
-async def _get_gemini_categorization(vendor_info: str, document_data: dict, transaction_purpose: str, max_retries: int = 3) -> dict:
+async def _get_gemini_categorization(vendor_info: str, document_data: dict, transaction_purpose: str) -> dict:
     """
     Helper function to get Gemini AI categorization with retry logic for rate limits.
-    Uses exponential backoff when hitting rate limits (429 errors).
+    Uses semaphore and exponential backoff when hitting rate limits (429 errors).
     Includes caching to avoid duplicate API calls for similar transactions.
     """
-    import random
-
     # Check cache first
     cached_result = _get_from_cache(vendor_info)
     if cached_result:
@@ -2502,11 +2511,10 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
     classification aligns with standard chart of accounts structures.
     """
 
-    # Send the request to Gemini API with retry logic
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            response = await asyncio.to_thread(
+    # Send the request to Gemini API (with semaphore and retry)
+    async def hybrid_categorize_with_gemini():
+        async with GEMINI_SEMAPHORE:
+            return await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.0-flash",
                 contents=prompt,
@@ -2515,29 +2523,11 @@ async def _get_gemini_categorization(vendor_info: str, document_data: dict, tran
                     "response_mime_type": "application/json"
                 }
             )
-            # If successful, break out of retry loop
-            break
-        except Exception as api_error:
-            last_error = api_error
-            error_str = str(api_error).lower()
 
-            # Check if it's a rate limit error (429) or resource exhausted
-            is_rate_limit = "429" in error_str or "resource_exhausted" in error_str or "quota" in error_str
-
-            if is_rate_limit and attempt < max_retries - 1:
-                # Exponential backoff with jitter: 2^attempt * (1 + random) seconds
-                base_delay = 2 ** attempt  # 1, 2, 4 seconds
-                jitter = random.uniform(0.5, 1.5)
-                delay = base_delay * jitter
-                print(f"[GEMINI] Rate limit hit, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
-                await asyncio.sleep(delay)
-                continue
-            else:
-                # Not a rate limit error or max retries reached
-                raise api_error
-    else:
-        # All retries exhausted
-        return {"error": f"Rate limit exceeded after {max_retries} retries: {str(last_error)}", "confidence": 0}
+    try:
+        response = await retry_with_backoff(hybrid_categorize_with_gemini)
+    except Exception as api_error:
+        return {"error": f"Rate limit exceeded: {get_user_friendly_error(api_error)}", "confidence": 0}
 
     # Parse and return the response
     try:
