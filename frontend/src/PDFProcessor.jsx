@@ -694,14 +694,21 @@ const PDFProcessor = () => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await response.json().catch(() => ({}));
+        if (response.status === 429) {
+          throw new Error("Service is busy. Please wait 30 seconds and try again.");
+        }
         throw new Error(errorData.detail || `Upload failed: ${response.status}`);
       }
 
       const data = await response.json();
 
       if (!data.success) {
-        throw new Error(data.error || "Failed to parse bank statement");
+        const errorMsg = data.error || "Failed to parse bank statement";
+        if (data.retry_suggested) {
+          throw new Error(`${errorMsg} Please wait a moment and try again.`);
+        }
+        throw new Error(errorMsg);
       }
 
       // The endpoint returns statement_id when user is authenticated

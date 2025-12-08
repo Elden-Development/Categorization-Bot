@@ -3109,6 +3109,7 @@ async def parse_bank_statement(
         transactions = parser.parse(file_content, file_type)
 
         # If basic parser returns no transactions for PDF, try Gemini AI
+        gemini_error_message = None
         if len(transactions) == 0 and (file_type == 'pdf' or file_type == 'application/pdf'):
             print(f"Basic parser found 0 transactions in PDF, trying Gemini AI...")
             try:
@@ -3117,7 +3118,9 @@ async def parse_bank_statement(
                     parsing_method = "gemini_ai"
                     print(f"Gemini AI successfully extracted {len(transactions)} transactions")
             except Exception as gemini_error:
-                print(f"Gemini AI parsing failed: {str(gemini_error)}")
+                error_str = str(gemini_error)
+                print(f"Gemini AI parsing failed: {error_str}")
+                gemini_error_message = get_user_friendly_error(gemini_error)
                 # Keep transactions as empty list from basic parser
 
         # Save to database if user is authenticated
@@ -3164,6 +3167,17 @@ async def parse_bank_statement(
             except Exception as e:
                 print(f"Warning: Failed to save bank statement to database: {e}")
 
+        # If no transactions found and there was a Gemini error, report it
+        if len(transactions) == 0 and gemini_error_message:
+            return {
+                "success": False,
+                "error": f"Could not extract transactions: {gemini_error_message}",
+                "transactions": [],
+                "count": 0,
+                "file_name": file.filename,
+                "retry_suggested": True
+            }
+
         return {
             "success": True,
             "transactions": transactions,
@@ -3178,7 +3192,7 @@ async def parse_bank_statement(
         print(f"Error parsing bank statement: {str(e)}")
         return {
             "success": False,
-            "error": f"Error parsing bank statement: {str(e)}"
+            "error": f"Error parsing bank statement: {get_user_friendly_error(e)}"
         }
 
 # Define request model for reconciliation
