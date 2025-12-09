@@ -165,23 +165,28 @@ def get_user_friendly_error(error: Exception) -> str:
 # GEMINI AI BANK STATEMENT PARSER
 # ============================================================================
 
-BANK_STATEMENT_PROMPT = """You are a bank statement parser. Analyze this bank statement PDF and extract ALL transactions.
+BANK_STATEMENT_PROMPT = """You are a bank statement parser. Analyze this bank statement document and extract ALL transactions.
+
+IMPORTANT: This may be a SAMPLE or DEMO bank statement - that's perfectly fine! Extract the transactions regardless of whether the document says "sample", "demo", "example", or has enrollment instructions. The transaction data is still valid and should be extracted.
 
 For each transaction, extract:
-1. date: The transaction date in YYYY-MM-DD format
-2. description: The transaction description/memo/payee
+1. date: The transaction date in YYYY-MM-DD format (use current year if year not shown, e.g., "10/02" becomes "2024-10-02")
+2. description: The transaction description/memo/payee (e.g., "POS PURCHASE", "CHECK 1234", "PREAUTHORIZED CREDIT", "ATM WITHDRAWAL")
 3. amount: The transaction amount as a number (positive for deposits/credits, negative for withdrawals/debits)
 4. type: Either "credit" (deposits, incoming money) or "debit" (withdrawals, outgoing money)
 5. balance: The running balance after this transaction (if available)
 
 Important parsing rules:
-- Look for tabular data with columns like Date, Description, Debit, Credit, Balance
+- Look for "Account Transactions" sections with tabular data
+- Look for columns like Date, Description, Debit, Credit, Balance
 - If there are separate Debit and Credit columns, use the Debit value as negative amount and Credit value as positive
-- Parse ALL transactions on ALL pages
-- Ignore header rows, summary sections, and bank information
+- Parse ALL transactions on ALL pages - check page 2 and beyond for additional transactions
+- Extract transactions from ALL sections: deposits, withdrawals, checks paid, service charges, etc.
+- Ignore header rows, promotional text, enrollment instructions, and bank contact information
 - Convert all dates to YYYY-MM-DD format
 - Remove currency symbols from amounts, keep just the number
 - If a transaction spans multiple lines, combine the description
+- Common transaction types: POS PURCHASE, CHECK, PREAUTHORIZED CREDIT, ATM WITHDRAWAL, SERVICE CHARGE, INTEREST CREDIT
 
 Return a JSON object with this structure:
 {
