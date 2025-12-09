@@ -136,7 +136,11 @@
   white-space: nowrap;
 }
 .stat-card.amount {
-  min-width: 200px;
+  min-width: 180px;
+  overflow: visible;
+}
+.stat-card.amount p {
+  white-space: nowrap;
 }
 
 /* Category Breakdown */
