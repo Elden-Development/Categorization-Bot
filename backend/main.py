@@ -931,8 +931,14 @@ def detect_document_type(json_data):
                     "processor_statement", "acquirer_statement"]:
         return "payment_processing"
     
-    # Check for bank statement indicators
-    if doc_type in ["bankstatement", "bank_statement", "account_statement"]:
+    # Check for bank statement indicators (including sample statements)
+    if doc_type in ["bankstatement", "bank_statement", "account_statement",
+                    "sample_statement", "sample_bank_statement", "statement_of_account",
+                    "checking_statement", "savings_statement", "account_activity"]:
+        return "bank_statement"
+
+    # Also check if it contains "statement" and "account" together
+    if "statement" in doc_type and ("account" in doc_type or "bank" in doc_type or "checking" in doc_type):
         return "bank_statement"
     
     # Check for invoice indicators
@@ -960,11 +966,28 @@ def detect_document_type(json_data):
     if "credits" in str(json_data).lower() and "sales" in str(json_data).lower() and "settlement" in str(json_data).lower():
         return "payment_processing"
     
-    # Check for indicators of a bank statement
-    if any(keyword in str(json_data).lower() for keyword in 
-           ["account number", "routing number", "beginning balance", "ending balance", 
-            "deposits", "withdrawals", "account summary"]):
+    # Check for indicators of a bank statement (expanded keyword list)
+    bank_keywords = [
+        "account number", "routing number", "beginning balance", "ending balance",
+        "deposits", "withdrawals", "account summary", "statement of account",
+        "account transactions", "daily balance", "running balance", "opening balance",
+        "closing balance", "pos purchase", "atm withdrawal", "preauthorized credit",
+        "service charge", "interest credit", "checks paid", "account activity",
+        "checking account", "savings account", "debit", "credit"
+    ]
+    json_str = str(json_data).lower()
+
+    # Count how many bank statement indicators we find
+    matches = sum(1 for keyword in bank_keywords if keyword in json_str)
+
+    # If we find 3 or more indicators, it's very likely a bank statement
+    if matches >= 3:
         return "bank_statement"
+
+    # Also check for the specific pattern of having both debit/credit columns with dates
+    if ("debit" in json_str or "withdrawal" in json_str) and ("credit" in json_str or "deposit" in json_str):
+        if "balance" in json_str and any(d in json_str for d in ["date", "transaction"]):
+            return "bank_statement"
     
     # Check for invoice indicators (if not already detected)
     if "invoice" in str(json_data).lower() or "bill to" in str(json_data).lower():
